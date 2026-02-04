@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # 🎮 GestureHub - Computer Vision Gaming Platform
 
 A real-time multiplayer gaming platform powered by computer vision, where players use hand gestures and body movements to play interactive games.
@@ -272,3 +273,7 @@ MIT License - feel free to use this project for learning or building your own ga
 **Made with ❤️ for AI Engineers**
 
 Questions? Open an issue or reach out!
+=======
+# GamifYou
+An personal space to handgout with your friends talk, play, enjoy, share &amp; make memories Virtually 
+>>>>>>> 875b341dd6d6822e48327cf080303a5dab9ac61b

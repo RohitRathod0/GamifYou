@@ -1,0 +1,24 @@
+# Core FastAPI with WebSocket support
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+websockets==13.1
+
+# Data validation
+pydantic==2.10.3
+pydantic-settings==2.6.1
+
+# Redis for room management
+redis==5.2.0
+hiredis==3.0.0
+
+# CORS
+python-multipart==0.0.17
+
+# Utilities
+python-dotenv==1.0.1
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# Optional: If you want to add authentication later
+# python-jose[cryptography]==3.3.0
+# passlib[bcrypt]==1.7.4

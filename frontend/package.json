@@ -1,0 +1,36 @@
+{
+    "name": "gesturehub-frontend",
+    "private": true,
+    "version": "1.0.0",
+    "type": "module",
+    "scripts": {
+        "dev": "vite",
+        "build": "tsc && vite build",
+        "preview": "vite preview",
+        "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0"
+    },
+    "dependencies": {
+        "@mediapipe/camera_utils": "^0.3.1620248595",
+        "@mediapipe/drawing_utils": "^0.3.1620248257",
+        "@mediapipe/hands": "^0.4.1646424915",
+        "axios": "^1.6.7",
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1",
+        "react-router-dom": "^6.22.0",
+        "socket.io-client": "^4.7.4",
+        "zustand": "^4.5.0"
+    },
+    "devDependencies": {
+        "@types/node": "^25.2.0",
+        "@types/react": "^18.3.12",
+        "@types/react-dom": "^18.3.1",
+        "@typescript-eslint/eslint-plugin": "^7.0.0",
+        "@typescript-eslint/parser": "^7.0.0",
+        "@vitejs/plugin-react": "^4.3.3",
+        "eslint": "^8.57.0",
+        "eslint-plugin-react-hooks": "^4.6.0",
+        "eslint-plugin-react-refresh": "^0.4.5",
+        "typescript": "^5.6.2",
+        "vite": "^5.4.11"
+    }
+}

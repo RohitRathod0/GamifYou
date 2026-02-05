@@ -53,6 +53,22 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
     const [score2, setScore2] = useState(0);
 
     const animationRef = useRef<number>();
+    const puckRef = useRef<Puck>(puck);
+    const paddle1Ref = useRef<Paddle>(paddle1);
+    const paddle2Ref = useRef<Paddle>(paddle2);
+
+    // Update refs when state changes
+    useEffect(() => {
+        puckRef.current = puck;
+    }, [puck]);
+
+    useEffect(() => {
+        paddle1Ref.current = paddle1;
+    }, [paddle1]);
+
+    useEffect(() => {
+        paddle2Ref.current = paddle2;
+    }, [paddle2]);
 
     // Update BOTH paddles from hand tracking with hand-locking system
     useEffect(() => {
@@ -164,75 +180,75 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
             // Draw paddles
             ctx.fillStyle = '#ff0000';
             ctx.beginPath();
-            ctx.arc(paddle1.x, paddle1.y, paddle1.radius, 0, Math.PI * 2);
+            ctx.arc(paddle1Ref.current.x, paddle1Ref.current.y, paddle1Ref.current.radius, 0, Math.PI * 2);
             ctx.fill();
 
             ctx.fillStyle = '#0000ff';
             ctx.beginPath();
-            ctx.arc(paddle2.x, paddle2.y, paddle2.radius, 0, Math.PI * 2);
+            ctx.arc(paddle2Ref.current.x, paddle2Ref.current.y, paddle2Ref.current.radius, 0, Math.PI * 2);
             ctx.fill();
 
-            // Update puck physics (always run locally)
-            setPuck((prevPuck) => {
-                let newPuck = { ...prevPuck };
+            // Update puck physics (use ref to avoid setState in loop)
+            let newPuck = { ...puckRef.current };
 
-                // Move puck
-                newPuck.x += newPuck.vx * deltaTime;
-                newPuck.y += newPuck.vy * deltaTime;
+            // Move puck
+            newPuck.x += newPuck.vx * deltaTime;
+            newPuck.y += newPuck.vy * deltaTime;
 
-                // Wall collisions (left/right)
-                if (newPuck.x - newPuck.radius < 0 || newPuck.x + newPuck.radius > canvas.width) {
-                    newPuck.vx *= -0.95; // Slight dampening
-                    newPuck.x = Math.max(newPuck.radius, Math.min(canvas.width - newPuck.radius, newPuck.x));
+            // Wall collisions (left/right)
+            if (newPuck.x - newPuck.radius < 0 || newPuck.x + newPuck.radius > canvas.width) {
+                newPuck.vx *= -0.95; // Slight dampening
+                newPuck.x = Math.max(newPuck.radius, Math.min(canvas.width - newPuck.radius, newPuck.x));
+            }
+
+            // Goal detection - only score when puck CENTER enters goal area AND is within goal width
+            const goalWidth = 200; // Goal is 200px wide
+            const goalLeft = canvas.width / 2 - goalWidth / 2;
+            const goalRight = canvas.width / 2 + goalWidth / 2;
+
+            if (newPuck.y < 20 && newPuck.x > goalLeft && newPuck.x < goalRight) {
+                // Player 2 (blue) scores - puck entered top goal
+                setScore2(s => s + 1);
+                newPuck = { x: 400, y: 300, vx: 3, vy: 2, radius: 15 };
+            } else if (newPuck.y > canvas.height - 20 && newPuck.x > goalLeft && newPuck.x < goalRight) {
+                // Player 1 (red) scores - puck entered bottom goal
+                setScore1(s => s + 1);
+                newPuck = { x: 400, y: 300, vx: 3, vy: -2, radius: 15 };
+            }
+
+            // Paddle collisions
+            const checkPaddleCollision = (paddle: Paddle) => {
+                const dx = newPuck.x - paddle.x;
+                const dy = newPuck.y - paddle.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+
+                if (distance < newPuck.radius + paddle.radius) {
+                    // Bounce off paddle
+                    const angle = Math.atan2(dy, dx);
+                    const speed = Math.sqrt(newPuck.vx * newPuck.vx + newPuck.vy * newPuck.vy);
+                    const newSpeed = Math.min(speed * 1.1, 8); // Speed up slightly, cap at 8
+
+                    newPuck.vx = Math.cos(angle) * newSpeed;
+                    newPuck.vy = Math.sin(angle) * newSpeed;
+
+                    // Move puck outside paddle to prevent sticking
+                    const overlap = newPuck.radius + paddle.radius - distance;
+                    newPuck.x += Math.cos(angle) * overlap;
+                    newPuck.y += Math.sin(angle) * overlap;
                 }
+            };
 
-                // Goal detection - only score when puck CENTER enters goal area AND is within goal width
-                const goalWidth = 200; // Goal is 200px wide
-                const goalLeft = canvas.width / 2 - goalWidth / 2;
-                const goalRight = canvas.width / 2 + goalWidth / 2;
+            checkPaddleCollision(paddle1Ref.current);
+            checkPaddleCollision(paddle2Ref.current);
 
-                if (newPuck.y < 20 && newPuck.x > goalLeft && newPuck.x < goalRight) {
-                    // Player 2 (blue) scores - puck entered top goal
-                    setScore2(s => s + 1);
-                    newPuck = { x: 400, y: 300, vx: 3, vy: 2, radius: 15 };
-                } else if (newPuck.y > canvas.height - 20 && newPuck.x > goalLeft && newPuck.x < goalRight) {
-                    // Player 1 (red) scores - puck entered bottom goal
-                    setScore1(s => s + 1);
-                    newPuck = { x: 400, y: 300, vx: 3, vy: -2, radius: 15 };
-                }
-
-                // Paddle collisions
-                const checkPaddleCollision = (paddle: Paddle) => {
-                    const dx = newPuck.x - paddle.x;
-                    const dy = newPuck.y - paddle.y;
-                    const distance = Math.sqrt(dx * dx + dy * dy);
-
-                    if (distance < newPuck.radius + paddle.radius) {
-                        // Bounce off paddle
-                        const angle = Math.atan2(dy, dx);
-                        const speed = Math.sqrt(newPuck.vx * newPuck.vx + newPuck.vy * newPuck.vy);
-                        const newSpeed = Math.min(speed * 1.1, 8); // Speed up slightly, cap at 8
-
-                        newPuck.vx = Math.cos(angle) * newSpeed;
-                        newPuck.vy = Math.sin(angle) * newSpeed;
-
-                        // Move puck outside paddle to prevent sticking
-                        const overlap = newPuck.radius + paddle.radius - distance;
-                        newPuck.x += Math.cos(angle) * overlap;
-                        newPuck.y += Math.sin(angle) * overlap;
-                    }
-                };
-
-                checkPaddleCollision(paddle1);
-                checkPaddleCollision(paddle2);
-
-                return newPuck;
-            });
+            // Update puck ref
+            puckRef.current = newPuck;
+            setPuck(newPuck); // Update state for React (but won't trigger re-render loop)
 
             // Draw puck
             ctx.fillStyle = '#ffff00';
             ctx.beginPath();
-            ctx.arc(puck.x, puck.y, puck.radius, 0, Math.PI * 2);
+            ctx.arc(newPuck.x, newPuck.y, newPuck.radius, 0, Math.PI * 2);
             ctx.fill();
 
             // Draw scores
@@ -252,7 +268,7 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
                 cancelAnimationFrame(animationRef.current);
             }
         };
-    }, [paddle1, paddle2, puck, score1, score2]);
+    }, [score1, score2]); // Removed paddle1, paddle2, puck from dependencies
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '20px' }}>

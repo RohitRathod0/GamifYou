@@ -200,6 +200,37 @@ export const Lobby: React.FC<LobbyProps> = ({ setAppState }) => {
                 >
                     {isLoading ? 'Joining...' : 'Join Room'}
                 </button>
+
+                <div style={{ textAlign: 'center', margin: '30px 0', color: '#666', fontSize: '0.9rem' }}>
+                    — OR TRY NEW FEATURES —
+                </div>
+
+                <button
+                    onClick={() => navigate('/face-swap')}
+                    style={{
+                        width: '100%',
+                        padding: '14px',
+                        borderRadius: '6px',
+                        border: '2px solid #667eea',
+                        backgroundColor: 'transparent',
+                        color: '#667eea',
+                        fontSize: '1rem',
+                        fontWeight: 'bold',
+                        cursor: 'pointer',
+                        transition: 'all 0.3s',
+                        background: 'linear-gradient(135deg, #667eea15 0%, #764ba215 100%)'
+                    }}
+                    onMouseOver={(e) => {
+                        e.currentTarget.style.backgroundColor = '#667eea';
+                        e.currentTarget.style.color = 'white';
+                    }}
+                    onMouseOut={(e) => {
+                        e.currentTarget.style.backgroundColor = 'transparent';
+                        e.currentTarget.style.color = '#667eea';
+                    }}
+                >
+                    🎭 Face Swap Demo (Day 1)
+                </button>
             </div>
         </div>
     );

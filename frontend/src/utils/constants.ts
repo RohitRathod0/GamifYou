@@ -1,5 +1,6 @@
 // API Configuration
-export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+// Use empty string to use Vite proxy (avoids mixed content errors with HTTPS)
+export const API_BASE_URL = '';  // Proxy configured in vite.config.ts
 export const WS_BASE_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000';
 
 // Game Configuration

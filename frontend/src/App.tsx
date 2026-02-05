@@ -4,6 +4,7 @@ import { Lobby } from '@/components/Lobby';
 import { GameSelector } from '@/components/GameSelector';
 import { VideoFeed } from '@/components/VideoFeed';
 import { HandTrackingData } from '@/hooks/useHandTracking';
+import { FaceSwapDemo } from '@/features/faceswap/FaceSwapDemo';
 
 interface AppState {
     username: string;
@@ -38,6 +39,10 @@ function App() {
                                 setAppState={setAppState}
                             />
                         }
+                    />
+                    <Route
+                        path="/face-swap"
+                        element={<FaceSwapDemo />}
                     />
                     <Route
                         path="/room"

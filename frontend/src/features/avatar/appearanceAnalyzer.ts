@@ -12,7 +12,6 @@ export const extractSkinColor = (
     }
 
     try {
-        // Create a temporary canvas to sample pixels
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
         if (!ctx) return null;
@@ -21,14 +20,8 @@ export const extractSkinColor = (
         canvas.height = videoElement.videoHeight;
         ctx.drawImage(videoElement, 0, 0);
 
-        // Sample multiple points on the face (cheeks, forehead)
-        const samplePoints = [
-            234, // Left cheek
-            454, // Right cheek
-            10,  // Forehead center
-            123, // Left forehead
-            352, // Right forehead
-        ];
+        // Sample multiple points on the face
+        const samplePoints = [234, 454, 10, 123, 352];
 
         let totalR = 0;
         let totalG = 0;
@@ -40,11 +33,9 @@ export const extractSkinColor = (
             const x = Math.floor(landmark.x * canvas.width);
             const y = Math.floor(landmark.y * canvas.height);
 
-            // Sample a small area around the point
             const imageData = ctx.getImageData(x - 2, y - 2, 5, 5);
             const pixels = imageData.data;
 
-            // Average the pixels in this area
             for (let i = 0; i < pixels.length; i += 4) {
                 totalR += pixels[i];
                 totalG += pixels[i + 1];
@@ -86,12 +77,10 @@ export const detectHairColor = (
         canvas.height = videoElement.videoHeight;
         ctx.drawImage(videoElement, 0, 0);
 
-        // Sample points above the forehead (hair area)
         const forehead = landmarks[10];
         const x = Math.floor(forehead.x * canvas.width);
         const y = Math.floor(forehead.y * canvas.height);
 
-        // Sample above forehead
         const hairY = Math.max(0, y - 40);
         const imageData = ctx.getImageData(x - 10, hairY, 20, 20);
         const pixels = imageData.data;
@@ -113,5 +102,37 @@ export const detectHairColor = (
     } catch (error) {
         console.error('Error detecting hair color:', error);
         return null;
+    }
+};
+
+/**
+ * Calculate face shape proportions
+ */
+export const calculateFaceShape = (
+    landmarks: NormalizedLandmarkList
+): { width: number; height: number } => {
+    if (!landmarks || landmarks.length < 468) {
+        return { width: 1, height: 1 };
+    }
+
+    try {
+        const leftCheek = landmarks[234];
+        const rightCheek = landmarks[454];
+        const forehead = landmarks[10];
+        const chin = landmarks[152];
+
+        const faceWidth = Math.abs(rightCheek.x - leftCheek.x);
+        const faceHeight = Math.abs(forehead.y - chin.y);
+
+        const typicalRatio = 0.75;
+        const actualRatio = faceWidth / faceHeight;
+
+        const widthScale = Math.max(0.8, Math.min(1.2, actualRatio / typicalRatio));
+        const heightScale = Math.max(0.8, Math.min(1.2, typicalRatio / actualRatio));
+
+        return { width: widthScale, height: heightScale };
+    } catch (error) {
+        console.error('Error calculating face shape:', error);
+        return { width: 1, height: 1 };
     }
 };

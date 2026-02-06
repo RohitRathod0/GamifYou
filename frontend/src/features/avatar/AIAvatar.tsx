@@ -4,6 +4,7 @@ import { AvatarScene } from './AvatarScene';
 import { loadExpressionModels, detectExpressions, ExpressionSmoother } from './expressionDetector';
 import { estimateHeadPose } from './headPoseEstimator';
 import { mapExpressionToBlendShapes, interpolateBlendShapes, createNeutralBlendShapes } from './blendShapeMapper';
+import { extractSkinColor, detectHairColor, calculateFaceShape } from './appearanceAnalyzer';
 import { AvatarExpression, HeadPose, BlendShapes } from './types';
 
 /**
@@ -25,6 +26,12 @@ export function AIAvatar() {
 
     const expressionSmootherRef = useRef(new ExpressionSmoother(5));
     const currentBlendShapesRef = useRef<BlendShapes>(createNeutralBlendShapes());
+
+    // Appearance customization state
+    const [skinColor, setSkinColor] = useState<{ r: number; g: number; b: number } | undefined>();
+    const [hairColor, setHairColor] = useState<'dark' | 'light' | undefined>();
+    const [faceShape, setFaceShape] = useState<{ width: number; height: number } | undefined>();
+    const [appearanceScanned, setAppearanceScanned] = useState(false);
 
     // Load expression detection models
     useEffect(() => {
@@ -77,6 +84,25 @@ export function AIAvatar() {
 
         const landmarks = results.multiFaceLandmarks[0];
 
+        // Scan appearance once when first face is detected
+        if (!appearanceScanned && videoRef.current) {
+            const skin = extractSkinColor(videoRef.current, landmarks);
+            const hair = detectHairColor(videoRef.current, landmarks);
+            const shape = calculateFaceShape(landmarks);
+
+            if (skin) {
+                setSkinColor(skin);
+                console.log('✅ Skin color detected:', skin);
+            }
+            if (hair) {
+                setHairColor(hair);
+                console.log('✅ Hair color detected:', hair);
+            }
+            setFaceShape(shape);
+            console.log('✅ Face shape detected:', shape);
+            setAppearanceScanned(true);
+        }
+
         // Update head pose
         const pose = estimateHeadPose(landmarks);
         setHeadPose(pose);
@@ -103,7 +129,7 @@ export function AIAvatar() {
                 }
             });
         }
-    }, [results, modelsLoaded]);
+    }, [results, modelsLoaded, appearanceScanned]);
 
     // Draw landmarks on canvas
     const drawLandmarks = useCallback(() => {
@@ -247,7 +273,10 @@ export function AIAvatar() {
                     <div style={{ backgroundColor: '#1a1a1a', borderRadius: '8px', overflow: 'hidden', height: '500px' }}>
                         <AvatarScene
                             headPose={headPose}
-                            blendShapes={blendShapes}
+                            blendShapes={blendShapes as Record<string, number>}
+                            skinColor={skinColor}
+                            hairColor={hairColor}
+                            faceShape={faceShape}
                         />
                     </div>
 

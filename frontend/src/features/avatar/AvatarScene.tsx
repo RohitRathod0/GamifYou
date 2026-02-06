@@ -9,12 +9,15 @@ interface AvatarSceneProps {
     modelUrl?: string;
     headPose?: HeadPose;
     blendShapes?: Record<string, number>;
+    skinColor?: { r: number; g: number; b: number };
+    hairColor?: 'dark' | 'light';
+    faceShape?: { width: number; height: number };
 }
 
 /**
  * Avatar Model Component - Renders and animates the 3D avatar
  */
-function AvatarModel({ modelUrl, headPose, blendShapes }: AvatarSceneProps) {
+function AvatarModel({ modelUrl, headPose, blendShapes, skinColor, hairColor, faceShape }: AvatarSceneProps) {
     const groupRef = useRef<THREE.Group>(null);
     const mixerRef = useRef<THREE.AnimationMixer>();
     const [avatar, setAvatar] = useState<LoadedAvatar | null>(null);
@@ -33,8 +36,7 @@ function AvatarModel({ modelUrl, headPose, blendShapes }: AvatarSceneProps) {
                         mixerRef.current = setupAnimationMixer(loadedAvatar.scene, loadedAvatar.animations);
                     }
                 } else {
-                    // Use fallback avatar
-                    const fallback = createFallbackAvatar();
+                    const fallback = createFallbackAvatar(skinColor, hairColor, faceShape);
                     if (mounted) {
                         setAvatar({
                             scene: fallback,
@@ -45,7 +47,7 @@ function AvatarModel({ modelUrl, headPose, blendShapes }: AvatarSceneProps) {
             } catch (error) {
                 console.error('Failed to load avatar, using fallback:', error);
                 if (mounted) {
-                    const fallback = createFallbackAvatar();
+                    const fallback = createFallbackAvatar(skinColor, hairColor, faceShape);
                     setAvatar({
                         scene: fallback,
                         animations: [],
@@ -59,7 +61,7 @@ function AvatarModel({ modelUrl, headPose, blendShapes }: AvatarSceneProps) {
         return () => {
             mounted = false;
         };
-    }, [modelUrl]);
+    }, [modelUrl, skinColor, hairColor, faceShape]);
 
     // Update head pose
     useEffect(() => {
@@ -85,7 +87,17 @@ function AvatarModel({ modelUrl, headPose, blendShapes }: AvatarSceneProps) {
                 }
             });
         }
-    }, [avatar, blendShapes]);
+
+        // Animate mouth for smile on fallback avatar
+        if (avatar?.scene && blendShapes) {
+            const mouth = avatar.scene.getObjectByName('mouth');
+            if (mouth) {
+                const smileAmount = (blendShapes.mouthSmileLeft + blendShapes.mouthSmileRight) / 2;
+                mouth.rotation.x = Math.PI - smileAmount * 0.5;
+                mouth.position.y = -0.3 * (faceShape?.height || 1) + smileAmount * 0.1;
+            }
+        }
+    }, [avatar, blendShapes, faceShape]);
 
     // Animation loop
     useFrame(() => {
@@ -105,7 +117,7 @@ function AvatarModel({ modelUrl, headPose, blendShapes }: AvatarSceneProps) {
 /**
  * Avatar Scene Component - Main 3D scene with lighting and camera
  */
-export function AvatarScene({ modelUrl, headPose, blendShapes }: AvatarSceneProps) {
+export function AvatarScene({ modelUrl, headPose, blendShapes, skinColor, hairColor, faceShape }: AvatarSceneProps) {
     return (
         <div style={{ width: '100%', height: '100%', minHeight: '400px' }}>
             <Canvas>
@@ -123,6 +135,9 @@ export function AvatarScene({ modelUrl, headPose, blendShapes }: AvatarSceneProp
                     modelUrl={modelUrl}
                     headPose={headPose}
                     blendShapes={blendShapes}
+                    skinColor={skinColor}
+                    hairColor={hairColor}
+                    faceShape={faceShape}
                 />
 
                 {/* Controls */}

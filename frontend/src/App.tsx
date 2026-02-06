@@ -5,6 +5,7 @@ import { GameSelector } from '@/components/GameSelector';
 import { VideoFeed } from '@/components/VideoFeed';
 import { HandTrackingData } from '@/hooks/useHandTracking';
 import { FaceSwapDemo } from '@/features/faceswap/FaceSwapDemo';
+import { AIAvatar } from '@/features/avatar/AIAvatar';
 
 interface AppState {
     username: string;
@@ -43,6 +44,10 @@ function App() {
                     <Route
                         path="/face-swap"
                         element={<FaceSwapDemo />}
+                    />
+                    <Route
+                        path="/ai-avatar"
+                        element={<AIAvatar />}
                     />
                     <Route
                         path="/room"

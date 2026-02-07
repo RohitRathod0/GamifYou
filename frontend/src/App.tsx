@@ -6,6 +6,7 @@ import { VideoFeed } from '@/components/VideoFeed';
 import { HandTrackingData } from '@/hooks/useHandTracking';
 import { FaceSwapDemo } from '@/features/faceswap/FaceSwapDemo';
 import { AIAvatar } from '@/features/avatar/AIAvatar';
+import { VirtualBackground } from '@/features/background/VirtualBackground';
 
 interface AppState {
     username: string;
@@ -48,6 +49,10 @@ function App() {
                     <Route
                         path="/ai-avatar"
                         element={<AIAvatar />}
+                    />
+                    <Route
+                        path="/virtual-background"
+                        element={<VirtualBackground />}
                     />
                     <Route
                         path="/room"

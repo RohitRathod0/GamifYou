@@ -118,7 +118,7 @@ export class ExpressionSmoother {
             smoothed.happy += exp.happy;
             smoothed.sad += exp.sad;
             smoothed.angry += exp.angry;
-            surprised += exp.surprised;
+            smoothed.surprised += exp.surprised;
             smoothed.neutral += exp.neutral;
             smoothed.fearful += exp.fearful;
             smoothed.disgusted += exp.disgusted;

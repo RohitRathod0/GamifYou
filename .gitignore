@@ -45,3 +45,10 @@ dist-ssr/
 
 # Redis
 dump.rdb
+
+# Binaries — never commit executables to source control
+*.exe
+*.bin
+*.dll
+*.dylib
+mkcert*

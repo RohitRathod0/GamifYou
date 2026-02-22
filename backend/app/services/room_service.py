@@ -11,7 +11,8 @@ class RoomService:
     @staticmethod
     def generate_room_code() -> str:
         """Generate a unique 6-character room code"""
-        return ''.join(random.choices(string.ascii_uppercase + string.digits, k=settings.ROOM_CODE_LENGTH))
+        return ''.join(random.choices(string.ascii_uppercase + string.digits, k=settings.room_code_length))
+
     
     @staticmethod
     async def create_room(host_id: str, username: str, max_players: int = 6) -> Room:

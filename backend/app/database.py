@@ -1,8 +1,9 @@
 import redis.asyncio as redis
-from app.config import settings
+from app.core.config import settings
 import json
 from typing import Optional, Any, Dict
 import logging
+
 
 logger = logging.getLogger(__name__)
 
@@ -17,11 +18,12 @@ class RedisDB:
         """Connect to Redis with fallback to in-memory storage"""
         try:
             self.redis = await redis.from_url(
-                f"redis://{settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_DB}",
-                password=settings.REDIS_PASSWORD,
+                f"redis://{settings.redis_host}:{settings.redis_port}/{settings.redis_db}",
+                password=settings.redis_password,
                 encoding="utf-8",
                 decode_responses=True
             )
+
             # Test connection
             await self.redis.ping()
             print("✅ Connected to Redis")

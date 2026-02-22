@@ -25,6 +25,8 @@ export const useHandTracking = (videoRef: React.RefObject<HTMLVideoElement>) => 
         landmarks: [],
         handedness: [],
     });
+    const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
+
     const handsRef = useRef<Hands | null>(null);
     const cameraRef = useRef<Camera | null>(null);
 
@@ -96,22 +98,49 @@ export const useHandTracking = (videoRef: React.RefObject<HTMLVideoElement>) => 
 
                 hands.onResults(onResults);
 
-                const camera = new Camera(videoRef.current!, {
-                    onFrame: async () => {
-                        if (videoRef.current && globalHandsInstance) {
+                // Get media stream explicitly so we capture audio as well
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({
+                        video: { width: 640, height: 480 },
+                        audio: true, // Request microphone access for WebRTC
+                    });
+
+                    if (videoRef.current) {
+                        videoRef.current.srcObject = stream;
+                        await videoRef.current.play();
+                    }
+
+                    setMediaStream(stream);
+
+                    const camera = new Camera(videoRef.current!, {
+                        onFrame: async () => {
+                            if (videoRef.current && globalHandsInstance) {
+                                await globalHandsInstance.send({ image: videoRef.current });
+                            }
+                        },
+                        width: 640,
+                        height: 480,
+                    });
+
+                    // We don't call camera.start() because that internally calls getUserMedia again 
+                    // without audio. Calling it repeatedly can cause issues. MediaPipe can still 
+                    // process frames via requestAnimationFrame.
+                    // Instead of camera.start(), we just implement our own frame loop
+                    const frameLoop = async () => {
+                        if (videoRef.current && globalHandsInstance && !videoRef.current.paused) {
                             await globalHandsInstance.send({ image: videoRef.current });
                         }
-                    },
-                    width: 640,
-                    height: 480,
-                });
+                        requestAnimationFrame(frameLoop);
+                    };
+                    frameLoop();
 
-                camera.start();
-
-                globalHandsInstance = hands;
-                globalCameraInstance = camera;
-                handsRef.current = hands;
-                cameraRef.current = camera;
+                    globalHandsInstance = hands;
+                    globalCameraInstance = camera;
+                    handsRef.current = hands;
+                    cameraRef.current = camera;
+                } catch (err) {
+                    console.error("Error accessing user media:", err);
+                }
 
                 console.log('✅ MediaPipe Hands initialized successfully!');
             })();
@@ -149,5 +178,6 @@ export const useHandTracking = (videoRef: React.RefObject<HTMLVideoElement>) => 
         trackingData,
         getIndexFingerTip,
         getPalmCenter,
+        mediaStream,
     };
 };

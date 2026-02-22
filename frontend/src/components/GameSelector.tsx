@@ -1,8 +1,7 @@
-
+import React from 'react';
 import { AirHockey } from '@/games/AirHockey';
 import { BalloonPop } from '@/games/BaloonPop';
-import { LaserDodger } from '@/games/LaserDodger';
-import { Pictionary } from '@/games/Pictionary';
+import { ARChessGame } from '@/games/ARChessGame';
 import { GAMES } from '@/utils/constants';
 import { HandTrackingData } from '@/hooks/useHandTracking';
 
@@ -26,9 +25,6 @@ export const GameSelector: React.FC<GameSelectorProps> = ({
             return (
                 <AirHockey
                     trackingData={trackingData}
-                    playerId={playerId}
-                    gameState={gameState}
-                    onStateUpdate={onStateUpdate}
                 />
             );
         case GAMES.BALLOON_POP:
@@ -40,19 +36,9 @@ export const GameSelector: React.FC<GameSelectorProps> = ({
                     onStateUpdate={onStateUpdate}
                 />
             );
-        case GAMES.LASER_DODGER:
+        case GAMES.CHESS:
             return (
-                <LaserDodger
-                    trackingData={trackingData}
-                    playerId={playerId}
-                    gameState={gameState}
-                    onStateUpdate={onStateUpdate}
-                />
-            );
-        case GAMES.PICTIONARY:
-            return (
-                <Pictionary
-                    trackingData={trackingData}
+                <ARChessGame
                     playerId={playerId}
                     gameState={gameState}
                     onStateUpdate={onStateUpdate}

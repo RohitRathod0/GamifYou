@@ -6,9 +6,8 @@ from datetime import datetime
 
 class GameType(str, Enum):
     AIR_HOCKEY = "air_hockey"
-    PICTIONARY = "pictionary"
-    LASER_DODGER = "laser_dodger"
     BALLOON_POP = "balloon_pop"
+    CHESS = "chess"
 
 
 class PlayerStatus(str, Enum):

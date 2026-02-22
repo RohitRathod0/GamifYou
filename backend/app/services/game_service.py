@@ -23,28 +23,6 @@ class GameService:
                 "winner": None
             }
         
-        elif game_type == GameType.PICTIONARY:
-            return {
-                "current_drawer": players[0] if players else None,
-                "drawer_index": 0,
-                "current_word": None,
-                "guessed_players": [],
-                "round": 1,
-                "max_rounds": len(players),
-                "time_remaining": 45,
-                "scores": {p: 0 for p in players}
-            }
-        
-        elif game_type == GameType.LASER_DODGER:
-            return {
-                "alive_players": players.copy(),
-                "player_health": {p: 100 for p in players},
-                "lasers": [],
-                "game_speed": 1.0,
-                "game_started": False,
-                "winner": None
-            }
-        
         elif game_type == GameType.BALLOON_POP:
             return {
                 "scores": {p: 0 for p in players},
@@ -54,13 +32,24 @@ class GameService:
                 "winner": None
             }
         
+        elif game_type == GameType.CHESS:
+            return {
+                "white_player_id": players[0] if len(players) > 0 else None,
+                "black_player_id": players[1] if len(players) > 1 else None,
+                "currentTurn": "white",
+                "chessBoard": None,  # Board managed on frontend
+                "enPassantTarget": None,
+                "lastMove": None,
+                "gameOver": None,
+                "game_started": True,
+            }
+        
         return {}
     
     @staticmethod
     def validate_game_update(game_type: GameType, current_state: Dict[str, Any], update: Dict[str, Any]) -> bool:
         """Validate game state update (basic validation)"""
         
-        # Basic validation - can be expanded
         if game_type == GameType.AIR_HOCKEY:
             if "player1_score" in update and "player2_score" in update:
                 return (
@@ -74,7 +63,10 @@ class GameService:
             if "scores" in update:
                 return all(isinstance(v, (int, float)) and v >= 0 for v in update["scores"].values())
         
-        # Add more validation as needed
+        elif game_type == GameType.CHESS:
+            # Chess logic is validated on frontend; accept all updates
+            return True
+        
         return True
     
     @staticmethod
@@ -87,21 +79,15 @@ class GameService:
             if game_state.get("player2_score", 0) >= 7:
                 return True, game_state.get("player2_id")
         
-        elif game_type == GameType.PICTIONARY:
-            if game_state.get("round", 1) > game_state.get("max_rounds", 1):
-                scores = game_state.get("scores", {})
-                winner = max(scores, key=scores.get) if scores else None
-                return True, winner
-        
-        elif game_type == GameType.LASER_DODGER:
-            alive = game_state.get("alive_players", [])
-            if len(alive) <= 1:
-                return True, alive[0] if alive else None
-        
         elif game_type == GameType.BALLOON_POP:
             if game_state.get("time_remaining", 60) <= 0:
                 scores = game_state.get("scores", {})
                 winner = max(scores, key=scores.get) if scores else None
                 return True, winner
+        
+        elif game_type == GameType.CHESS:
+            game_over = game_state.get("gameOver")
+            if game_over:
+                return True, game_over.get("winner")
         
         return False, None

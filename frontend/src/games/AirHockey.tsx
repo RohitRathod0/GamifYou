@@ -3,9 +3,6 @@ import { HandTrackingData } from '@/hooks/useHandTracking';
 
 interface AirHockeyProps {
     trackingData: HandTrackingData;
-    playerId: string;
-    gameState: any;
-    onStateUpdate: (state: any) => void;
 }
 
 interface Paddle {
@@ -24,9 +21,6 @@ interface Puck {
 
 export const AirHockey: React.FC<AirHockeyProps> = ({
     trackingData,
-    playerId,
-    gameState,
-    onStateUpdate,
 }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
 

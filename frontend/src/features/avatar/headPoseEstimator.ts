@@ -11,8 +11,6 @@ const NOSE_TIP = 1;
 const CHIN = 152;
 const LEFT_EYE = 33;
 const RIGHT_EYE = 263;
-const LEFT_EAR = 234;
-const RIGHT_EAR = 454;
 const FOREHEAD = 10;
 
 /**
@@ -28,8 +26,6 @@ export const estimateHeadPose = (landmarks: NormalizedLandmarkList): HeadPose =>
     const chin = landmarks[CHIN];
     const leftEye = landmarks[LEFT_EYE];
     const rightEye = landmarks[RIGHT_EYE];
-    const leftEar = landmarks[LEFT_EAR];
-    const rightEar = landmarks[RIGHT_EAR];
     const forehead = landmarks[FOREHEAD];
 
     // Calculate yaw (left-right rotation)

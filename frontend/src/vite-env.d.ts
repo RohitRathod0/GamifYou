@@ -1,4 +1,5 @@
 /// <reference types="vite/client" />
+declare const puter: any;
 
 interface ImportMetaEnv {
     readonly VITE_API_URL?: string;

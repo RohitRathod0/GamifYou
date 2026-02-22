@@ -76,12 +76,14 @@ function AvatarModel({ modelUrl, headPose, blendShapes, skinColor, hairColor, fa
     // Update blend shapes (morph targets)
     useEffect(() => {
         if (avatar?.morphTargets && blendShapes) {
-            avatar.morphTargets.forEach((mesh, name) => {
+            avatar.morphTargets.forEach((mesh) => {
                 if (mesh.morphTargetInfluences && mesh.morphTargetDictionary) {
                     Object.entries(blendShapes).forEach(([shapeName, value]) => {
-                        const index = mesh.morphTargetDictionary[shapeName];
+                        const dict = mesh.morphTargetDictionary as Record<string, number>;
+                        const influences = mesh.morphTargetInfluences as number[];
+                        const index = dict[shapeName];
                         if (index !== undefined) {
-                            mesh.morphTargetInfluences[index] = value;
+                            influences[index] = value;
                         }
                     });
                 }

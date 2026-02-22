@@ -155,7 +155,7 @@ export function AIAvatar() {
             const landmarks = results.multiFaceLandmarks[0];
 
             ctx.fillStyle = '#00ff00';
-            landmarks.forEach((landmark) => {
+            landmarks.forEach((landmark: any) => {
                 const x = landmark.x * canvas.width;
                 const y = landmark.y * canvas.height;
                 ctx.beginPath();
@@ -273,7 +273,7 @@ export function AIAvatar() {
                     <div style={{ backgroundColor: '#1a1a1a', borderRadius: '8px', overflow: 'hidden', height: '500px' }}>
                         <AvatarScene
                             headPose={headPose}
-                            blendShapes={blendShapes as Record<string, number>}
+                            blendShapes={blendShapes as unknown as Record<string, number>}
                             skinColor={skinColor}
                             hairColor={hairColor}
                             faceShape={faceShape}

@@ -1,5 +1,5 @@
 import { FaceMesh } from '@mediapipe/face_mesh';
-import { FaceDetectionResult, FaceMeshConfig, DEFAULT_FACE_MESH_CONFIG } from './types';
+import { FaceMeshConfig, DEFAULT_FACE_MESH_CONFIG } from './types';
 
 export class FaceDetectionService {
     private faceMesh: FaceMesh | null = null;
@@ -9,7 +9,7 @@ export class FaceDetectionService {
         if (this.isInitialized) return;
 
         this.faceMesh = new FaceMesh({
-            locateFile: (file) => {
+            locateFile: (file: string) => {
                 return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
             },
         });

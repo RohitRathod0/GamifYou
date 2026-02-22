@@ -1,4 +1,3 @@
-import { BackgroundConfig } from './types';
 
 /**
  * Background Effects - Blur, color, and image processing

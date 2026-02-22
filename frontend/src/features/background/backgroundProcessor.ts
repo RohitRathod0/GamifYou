@@ -1,9 +1,7 @@
 import { BackgroundConfig, SegmentationResult } from './types';
 import {
-    applyBlur,
     createColorBackground,
     loadBackgroundImage,
-    createGradientBackground,
     blurRegion,
 } from './effects';
 
@@ -83,7 +81,7 @@ export class BackgroundProcessor {
     }
 
     /**
-     * Composite person (foreground) over background using mask
+     * Composite person (foreground) over background using mask with alpha blending
      */
     private compositeLayers(
         foreground: ImageData,
@@ -93,21 +91,14 @@ export class BackgroundProcessor {
         const result = new ImageData(this.canvas.width, this.canvas.height);
 
         for (let i = 0; i < result.data.length; i += 4) {
-            const maskValue = mask.data[i] / 255; // 0 = background, 1 = person
+            // Smooth alpha: 0 = background, 1 = person
+            const alpha = mask.data[i] / 255;
 
-            if (maskValue > 0.5) {
-                // Person - use foreground
-                result.data[i] = foreground.data[i];
-                result.data[i + 1] = foreground.data[i + 1];
-                result.data[i + 2] = foreground.data[i + 2];
-                result.data[i + 3] = 255;
-            } else {
-                // Background - use replacement
-                result.data[i] = background.data[i];
-                result.data[i + 1] = background.data[i + 1];
-                result.data[i + 2] = background.data[i + 2];
-                result.data[i + 3] = 255;
-            }
+            // Alpha blend: person * alpha + background * (1 - alpha)
+            result.data[i] = foreground.data[i] * alpha + background.data[i] * (1 - alpha);
+            result.data[i + 1] = foreground.data[i + 1] * alpha + background.data[i + 1] * (1 - alpha);
+            result.data[i + 2] = foreground.data[i + 2] * alpha + background.data[i + 2] * (1 - alpha);
+            result.data[i + 3] = 255;
         }
 
         return result;

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { getFaceDetectionService } from '../features/faceswap/faceDetection';
-import { FaceMeshConfig, DEFAULT_FACE_MESH_CONFIG } from '../features/faceswap/types';
+import { getFaceDetectionService } from './faceMesh/faceDetection';
+import { FaceMeshConfig, DEFAULT_FACE_MESH_CONFIG } from './faceMesh/types';
 
 interface UseFaceMeshOptions {
     config?: FaceMeshConfig;

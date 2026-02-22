@@ -1,0 +1,13 @@
+﻿src/features/avatar/AvatarScene.tsx(79,48): error TS6133: 'name' is declared but its value is never read.
+src/features/avatar/AvatarScene.tsx(82,39): error TS18048: 'mesh.morphTargetDictionary' is possibly 'undefined'.
+src/features/avatar/AvatarScene.tsx(84,29): error TS18048: 'mesh.morphTargetInfluences' is possibly 'undefined'.
+src/features/avatar/headPoseEstimator.ts(31,11): error TS6133: 'leftEar' is declared but its value is never read.
+src/features/avatar/headPoseEstimator.ts(32,11): error TS6133: 'rightEar' is declared but its value is never read.
+src/features/background/AIBackgroundGenerator.tsx(118,11): error TS6133: 'abortRef' is declared but its value is never read.
+src/features/background/backgroundProcessor.ts(1,28): error TS2305: Module '"./types"' has no exported member 'SegmentationResult'.
+src/features/background/effects.ts(1,1): error TS6133: 'BackgroundConfig' is declared but its value is never read.
+src/features/faceswap/advancedSwap.ts(175,7): error TS6133: 'seamlessClone' is declared but its value is never read.
+src/features/faceswap/faceDetection.ts(2,10): error TS6133: 'FaceDetectionResult' is declared but its value is never read.
+src/games/AirHockey.tsx(27,5): error TS6133: 'playerId' is declared but its value is never read.
+src/games/AirHockey.tsx(28,5): error TS6133: 'gameState' is declared but its value is never read.
+src/games/AirHockey.tsx(29,5): error TS6133: 'onStateUpdate' is declared but its value is never read.

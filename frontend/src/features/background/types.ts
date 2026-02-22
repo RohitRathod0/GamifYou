@@ -2,28 +2,34 @@
  * Types for Virtual Background and Style Transfer features
  */
 
-export type BackgroundType = 'none' | 'blur' | 'image' | 'color' | 'style';
-
-export interface SegmentationResult {
-    mask: ImageData;
-    width: number;
-    height: number;
-    timestamp: number;
-}
+export type BackgroundType = 'none' | 'blur' | 'image' | 'color' | 'gradient' | 'style';
 
 export interface BackgroundConfig {
     type: BackgroundType;
-    blurAmount?: number; // 0-20, for blur type
-    imageUrl?: string; // for image type
-    color?: string; // for color type (hex or rgb)
-    styleModel?: string; // for style transfer
+    blurAmount?: number;       // 0–20, for blur type
+    imageUrl?: string;         // for image type (preset or uploaded data URL)
+    color?: string;            // for color type (hex)
+    gradientColors?: string[]; // for gradient type
+    gradientAngle?: number;    // 0–360 degrees
+    styleFilter?: StyleFilter; // for style type
 }
 
-export interface VirtualBackgroundOptions {
-    enabled: boolean;
-    config: BackgroundConfig;
-    quality: 'low' | 'medium' | 'high';
-    edgeSmoothing: number; // 0-1
+export type StyleFilter =
+    | 'grayscale'
+    | 'sepia'
+    | 'invert'
+    | 'neon'
+    | 'vintage'
+    | 'cool'
+    | 'warm'
+    | 'hue-rotate'
+    | 'pixelate';
+
+export interface StyleFilterDef {
+    id: StyleFilter;
+    name: string;
+    emoji: string;
+    cssFilter: string;
 }
 
 export interface BackgroundImage {
@@ -34,16 +40,13 @@ export interface BackgroundImage {
     category: 'nature' | 'office' | 'abstract' | 'space' | 'city';
 }
 
-export interface StyleTransferModel {
-    id: string;
+export interface GradientPreset {
     name: string;
-    description: string;
-    modelUrl: string;
-    thumbnail: string;
-    artist?: string;
+    colors: string[];
+    angle: number;
 }
 
-export interface SegmentationConfig {
-    modelSelection: 0 | 1; // 0 = general, 1 = landscape
-    selfieMode: boolean;
+export interface SegmentationResult {
+    mask: ImageData;
 }
+

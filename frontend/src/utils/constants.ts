@@ -6,16 +6,14 @@ export const WS_BASE_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000';
 // Game Configuration
 export const GAMES = {
     AIR_HOCKEY: 'air_hockey',
-    PICTIONARY: 'pictionary',
-    LASER_DODGER: 'laser_dodger',
     BALLOON_POP: 'balloon_pop',
+    CHESS: 'chess',
 } as const;
 
 export const GAME_NAMES = {
     [GAMES.AIR_HOCKEY]: 'Air Hockey',
-    [GAMES.PICTIONARY]: 'Gesture Pictionary',
-    [GAMES.LASER_DODGER]: 'Laser Dodger',
     [GAMES.BALLOON_POP]: 'Balloon Pop',
+    [GAMES.CHESS]: 'Chess',
 };
 
 // MediaPipe Configuration

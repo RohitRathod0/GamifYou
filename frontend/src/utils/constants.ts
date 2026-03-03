@@ -8,12 +8,14 @@ export const GAMES = {
     AIR_HOCKEY: 'air_hockey',
     BALLOON_POP: 'balloon_pop',
     CHESS: 'chess',
+    FACE_PUZZLE: 'face_puzzle',
 } as const;
 
 export const GAME_NAMES = {
     [GAMES.AIR_HOCKEY]: 'Air Hockey',
     [GAMES.BALLOON_POP]: 'Balloon Pop',
     [GAMES.CHESS]: 'Chess',
+    [GAMES.FACE_PUZZLE]: 'Face Puzzle',
 };
 
 // MediaPipe Configuration

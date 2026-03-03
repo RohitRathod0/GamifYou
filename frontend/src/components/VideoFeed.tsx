@@ -6,6 +6,7 @@ import { getSegmentation } from '@/features/background/segmentationSingleton';
 
 
 interface VideoFeedProps {
+    localStream?: MediaStream | null;
     onTrackingData?: (data: any) => void;
 }
 
@@ -20,7 +21,7 @@ const QUICK_BG: { label: string; emoji: string; config: BackgroundConfig }[] = [
     { label: 'Sepia', emoji: '📷', config: { type: 'style', styleFilter: 'vintage' } },
 ];
 
-export const VideoFeed: React.FC<VideoFeedProps> = ({ onTrackingData }) => {
+export const VideoFeed: React.FC<VideoFeedProps> = ({ localStream = undefined, onTrackingData }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const segRef = useRef<any>(null);
@@ -42,7 +43,7 @@ export const VideoFeed: React.FC<VideoFeedProps> = ({ onTrackingData }) => {
     useEffect(() => { bgConfigRef.current = bgConfig; }, [bgConfig]);
 
     // ── Hand tracking ─────────────────────────────────────────────────────────
-    const { isReady: trackingReady, trackingData } = useHandTracking(videoRef);
+    const { isReady: trackingReady, trackingData } = useHandTracking(videoRef, localStream);
     useEffect(() => {
         if (onTrackingData && trackingData) onTrackingData(trackingData);
     }, [trackingData, onTrackingData]);

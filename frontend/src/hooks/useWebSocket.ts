@@ -3,10 +3,11 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 interface UseWebSocketProps {
     roomCode: string;
     playerId: string;
+    shouldConnect?: boolean;
     onMessage?: (data: any) => void;
 }
 
-export const useWebSocket = ({ roomCode, playerId, onMessage }: UseWebSocketProps) => {
+export const useWebSocket = ({ roomCode, playerId, shouldConnect = true, onMessage }: UseWebSocketProps) => {
     const [isConnected, setIsConnected] = useState(false);
     const wsRef = useRef<WebSocket | null>(null);
 
@@ -62,12 +63,14 @@ export const useWebSocket = ({ roomCode, playerId, onMessage }: UseWebSocketProp
     }, []);
 
     useEffect(() => {
-        connect();
+        if (shouldConnect) {
+            connect();
+        }
 
         return () => {
             disconnect();
         };
-    }, [connect, disconnect]);
+    }, [connect, disconnect, shouldConnect]);
 
     return {
         isConnected,

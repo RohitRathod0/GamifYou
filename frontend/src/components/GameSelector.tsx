@@ -2,6 +2,7 @@ import React from 'react';
 import { AirHockey } from '@/games/AirHockey';
 import { BalloonPop } from '@/games/BaloonPop';
 import { ARChessGame } from '@/games/ARChessGame';
+import { FacePuzzle } from '@/games/FacePuzzle';
 import { GAMES } from '@/utils/constants';
 import { HandTrackingData } from '@/hooks/useHandTracking';
 
@@ -42,6 +43,12 @@ export const GameSelector: React.FC<GameSelectorProps> = ({
                     playerId={playerId}
                     gameState={gameState}
                     onStateUpdate={onStateUpdate}
+                />
+            );
+        case GAMES.FACE_PUZZLE:
+            return (
+                <FacePuzzle
+                    playerId={playerId}
                 />
             );
         default:

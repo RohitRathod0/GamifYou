@@ -19,7 +19,7 @@ let globalHandsInstance: Hands | null = null;
 let globalCameraInstance: Camera | null = null;
 let initializationPromise: Promise<void> | null = null;
 
-export const useHandTracking = (videoRef: React.RefObject<HTMLVideoElement>) => {
+export const useHandTracking = (videoRef: React.RefObject<HTMLVideoElement>, providedStream?: MediaStream | null) => {
     const [isReady, setIsReady] = useState(false);
     const [trackingData, setTrackingData] = useState<HandTrackingData>({
         landmarks: [],
@@ -54,6 +54,8 @@ export const useHandTracking = (videoRef: React.RefObject<HTMLVideoElement>) => 
 
     useEffect(() => {
         if (!videoRef.current) return;
+        // If providedStream is explicitly null (meaning we are waiting for it upstream), do not initialize yet
+        if (providedStream === null) return;
 
         const initializeMediaPipe = async () => {
             // Reuse existing instance if available
@@ -100,17 +102,24 @@ export const useHandTracking = (videoRef: React.RefObject<HTMLVideoElement>) => 
 
                 // Get media stream explicitly so we capture audio as well
                 try {
-                    const stream = await navigator.mediaDevices.getUserMedia({
-                        video: { width: 640, height: 480 },
-                        audio: true, // Request microphone access for WebRTC
-                    });
-
-                    if (videoRef.current) {
-                        videoRef.current.srcObject = stream;
-                        await videoRef.current.play();
+                    let stream = providedStream;
+                    if (providedStream === undefined) {
+                        stream = await navigator.mediaDevices.getUserMedia({
+                            video: { width: 640, height: 480 },
+                            audio: true, // Request microphone access for WebRTC
+                        });
                     }
 
-                    setMediaStream(stream);
+                    if (stream && videoRef.current) {
+                        if (videoRef.current.srcObject !== stream) {
+                            videoRef.current.srcObject = stream;
+                            await videoRef.current.play();
+                        }
+                    }
+
+                    if (stream) {
+                        setMediaStream(stream);
+                    }
 
                     const camera = new Camera(videoRef.current!, {
                         onFrame: async () => {
@@ -157,7 +166,7 @@ export const useHandTracking = (videoRef: React.RefObject<HTMLVideoElement>) => 
             console.log('🔄 Component unmounting, keeping MediaPipe instance alive');
             // Don't stop camera or close hands - keep them running for reuse
         };
-    }, [videoRef, onResults]);
+    }, [videoRef, onResults, providedStream]);
 
     const getIndexFingerTip = useCallback((handIndex: number = 0): HandLandmark | null => {
         if (trackingData.landmarks[handIndex] && trackingData.landmarks[handIndex][8]) {

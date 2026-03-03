@@ -3,7 +3,7 @@ import { useWebSocket } from '@/hooks/useWebSocket';
 import { useWebRTC } from '@/hooks/useWebRTC';
 import { VideoFeed } from '@/components/VideoFeed';
 import { GameSelector } from '@/components/GameSelector';
-import { useHandTracking, HandTrackingData } from '@/hooks/useHandTracking';
+import { HandTrackingData } from '@/hooks/useHandTracking';
 
 interface RoomViewProps {
     appState: any;
@@ -21,15 +21,32 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
     const [audioEnabled, setAudioEnabled] = useState(true);
     const [videoEnabled, setVideoEnabled] = useState(true);
 
-    // A dummy video ref just to get the media stream from useHandTracking if we aren't using VideoFeed's internals
-    const dummyVideoRef = useRef<HTMLVideoElement>(null);
-    const { trackingData, mediaStream } = useHandTracking(dummyVideoRef);
+    const [localStream, setLocalStream] = useState<MediaStream | null>(null);
     const [externalTrackingData, setExternalTrackingData] = useState<HandTrackingData>({ landmarks: [], handedness: [] });
+
+    // Fetch camera immediately
+    useEffect(() => {
+        let mounted = true;
+        console.log('1. Starting room join... getting camera');
+        navigator.mediaDevices.getUserMedia({
+            video: { width: 640, height: 480 },
+            audio: true
+        }).then(stream => {
+            if (mounted) {
+                console.log('3. Local stream obtained:', stream.id);
+                setLocalStream(stream);
+            } else {
+                stream.getTracks().forEach(t => t.stop());
+            }
+        }).catch(err => console.error('❌ Camera error:', err));
+        return () => { mounted = false; };
+    }, []);
 
     // Handle WebSocket Signaling
     const { sendMessage } = useWebSocket({
         roomCode,
         playerId,
+        shouldConnect: !!localStream,
         onMessage: (message) => {
             const { type, data } = message;
 
@@ -70,7 +87,7 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
     });
 
     const { createOffer, handleOffer, handleAnswer, handleIceCandidate, closePeerConnection } = useWebRTC({
-        localStream: mediaStream,
+        localStream: localStream,
         sendSignal: sendMessage,
         onRemoteStream: (peerId, stream) => {
             console.log("Received remote stream from", peerId, stream);
@@ -86,15 +103,15 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
 
     // Handle Mic/Camera Toggles
     useEffect(() => {
-        if (mediaStream) {
-            mediaStream.getAudioTracks().forEach(track => {
+        if (localStream) {
+            localStream.getAudioTracks().forEach(track => {
                 track.enabled = audioEnabled;
             });
-            mediaStream.getVideoTracks().forEach(track => {
+            localStream.getVideoTracks().forEach(track => {
                 track.enabled = videoEnabled;
             });
         }
-    }, [mediaStream, audioEnabled, videoEnabled]);
+    }, [localStream, audioEnabled, videoEnabled]);
 
     // Simple toast notification implementation
     const [notifications, setNotifications] = useState<{ id: number, msg: string }[]>([]);
@@ -153,11 +170,8 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                 </div>
             </div>
 
-            {/* Hidden dummy video for useHandTracking */}
-            <video ref={dummyVideoRef} style={{ display: 'none' }} playsInline muted />
-
             {/* Existing VideoFeed gives us background swap. We pass its tracking data up */}
-            <VideoFeed onTrackingData={setExternalTrackingData} />
+            <VideoFeed localStream={localStream} onTrackingData={setExternalTrackingData} />
 
             {/* Remote Video Picture-in-Picture Style */}
             {remoteStreams.size > 0 && (
@@ -184,7 +198,7 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                 <div style={{ flex: 1, position: 'relative' }}>
                     <GameSelector
                         game={currentGame}
-                        trackingData={externalTrackingData.landmarks.length > 0 ? externalTrackingData : trackingData}
+                        trackingData={externalTrackingData}
                         playerId={playerId}
                         gameState={{ player1_id: playerId }}
                         onStateUpdate={() => { }}
@@ -222,6 +236,15 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                             style={{ padding: '20px 40px', fontSize: '1.1rem', backgroundColor: '#00BCD4', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}
                         >
                             ♟️ Chess
+                        </button>
+                        <button
+                            onClick={() => {
+                                sendMessage('game_selected', { game_type: 'face_puzzle' });
+                                setAppState({ ...appState, currentGame: 'face_puzzle' });
+                            }}
+                            style={{ padding: '20px 40px', fontSize: '1.1rem', backgroundColor: '#9C27B0', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}
+                        >
+                            🧩 Face Puzzle
                         </button>
                     </div>
                 </div>

@@ -48,6 +48,7 @@ export const GameSelector: React.FC<GameSelectorProps> = ({
         case GAMES.FACE_PUZZLE:
             return (
                 <FacePuzzle
+                    trackingData={trackingData}
                     playerId={playerId}
                 />
             );

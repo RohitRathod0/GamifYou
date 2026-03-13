@@ -1,749 +1,712 @@
 /**
- * FacePuzzle.tsx
+ * FacePuzzle.tsx — AR Face Sliding Puzzle v4
  *
- * AR Face Puzzle — hand-gesture controlled sliding puzzle
+ * DRAW phase (NEW):
+ *   - Index fingertip silently builds a bounding box (no messy trail)
+ *   - Only a clean dashed rectangle + fingertip dot are drawn
+ *   - ✌️ Peace sign held 10 frames → captures that bbox region → SOLVE phase
  *
- * Phases:
- *   1. DRAWING   — user traces a square with index finger to capture face
- *   2. CAPTURED  — face sliced into 3×3 tiles, puzzle shown, waiting for first swipe
- *   3. PLAYING   — 15-second countdown, swipes slide tiles
- *   4. WON / LOST
- *
- * Rendering pipeline (single canvas):
- *   Camera feed → vignette → hand skeleton → game overlay → cursor
+ * SOLVE phase:
+ *   - Index finger hover identifies tile
+ *   - Swipe > 50px (canvas pixels) slides that specific tile if blank is adjacent
+ *   - ✌️ Peace sign → restart
  */
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { Hands, Results } from '@mediapipe/hands';
-import { Camera } from '@mediapipe/camera_utils';
-import {
-    classifyGesture,
-    drawHandSkeleton,
-    landmarkToCanvas,
-    HandLandmark,
-    GestureState,
-} from './GestureController';
+import { HandTrackingData } from '@/hooks/useHandTracking';
+import { drawHandSkeleton, landmarkToCanvas, HandLandmark } from './GestureController';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const GRID = 3;               // 3×3
-const TILE_COUNT = GRID * GRID; // 9 (index 8 = blank)
-const GAME_TIME = 15;         // seconds
-const SWIPE_THRESHOLD = 0.020; // normalized units/frame palm velocity
-const SWIPE_COOLDOWN = 480;   // ms between swipes
-const TRAIL_MAX = 40;         // max trail points for drawing phase
-const SQUARE_MIN_SIZE = 0.18;  // min normalized size of drawn square
+const GRID = 3;
+const TILE_COUNT = GRID * GRID;
+const GAME_TIME = 15;             // seconds
 
-type Phase = 'drawing' | 'captured' | 'playing' | 'won' | 'lost';
+const PEACE_HOLD = 10;            // consecutive frames holding peace sign
+const SWIPE_THR_PX = 50;            // canvas-pixel distance to fire swipe
+const ANIM_MS = 200;           // tile slide duration
+const INDEX_TIP = 8;
+const MIDDLE_TIP = 12;
+const RING_TIP = 16;
+const PINKY_TIP = 20;
+const INDEX_PIP = 6;
+const MIDDLE_PIP = 10;
+const RING_PIP = 14;
+const PINKY_PIP = 18;
 
-// 8-puzzle: blank is represented by index 8 in flat array [0..8]
-// Solved state: [0,1,2,3,4,5,6,7,8]
+type Phase = 'draw' | 'capturing' | 'solve' | 'won' | 'lost';
 
-function isSolvable(tiles: number[]): boolean {
-    let inversions = 0;
-    const arr = tiles.filter(t => t !== 8);
-    for (let i = 0; i < arr.length - 1; i++) {
-        for (let j = i + 1; j < arr.length; j++) {
-            if (arr[i] > arr[j]) inversions++;
-        }
-    }
-    return inversions % 2 === 0;
+// Direction map: [dr, dc] = offset from SOURCE TILE to BLANK
+const DIR_MAP: Record<string, [number, number]> = {
+    R: [0, +1], L: [0, -1], D: [+1, 0], U: [-1, 0],
+};
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function isPeaceSign(lm: HandLandmark[]): boolean {
+    const ext = (tip: number, pip: number) => lm[tip].y < lm[pip].y;
+    const cur = (tip: number, pip: number) => lm[tip].y > lm[pip].y;
+    return ext(INDEX_TIP, INDEX_PIP) && ext(MIDDLE_TIP, MIDDLE_PIP)
+        && cur(RING_TIP, RING_PIP) && cur(PINKY_TIP, PINKY_PIP);
 }
 
-function shuffle(arr: number[]): number[] {
-    const a = [...arr];
+function isSolvable(t: number[]): boolean {
+    let inv = 0;
+    const a = t.filter(x => x !== 8);
+    for (let i = 0; i < a.length - 1; i++)
+        for (let j = i + 1; j < a.length; j++)
+            if (a[i] > a[j]) inv++;
+    return inv % 2 === 0;
+}
+function isSolved(t: number[]) { return t.every((v, i) => v === i); }
+function makeShuffle(): number[] {
+    const a = [0, 1, 2, 3, 4, 5, 6, 7, 8];
     do {
-        for (let i = a.length - 1; i > 0; i--) {
+        for (let i = 8; i > 0; i--) {
             const j = Math.floor(Math.random() * (i + 1));
             [a[i], a[j]] = [a[j], a[i]];
         }
     } while (!isSolvable(a) || isSolved(a));
     return a;
 }
-
-function isSolved(tiles: number[]): boolean {
-    return tiles.every((t, i) => t === i);
+function slideTile(tiles: number[], tr: number, tc: number): number[] | null {
+    const bi = tiles.indexOf(8);
+    const br = Math.floor(bi / GRID), bc = bi % GRID;
+    if (Math.abs(br - tr) + Math.abs(bc - tc) !== 1) return null;
+    const n = [...tiles];[n[bi], n[tr * GRID + tc]] = [n[tr * GRID + tc], n[bi]]; return n;
 }
 
-// Returns new tiles after sliding in direction (blank moves opposite; adjacent tile moves into blank)
-// direction: the direction the user swipes their hand
-function applySwipe(tiles: number[], dir: 'left' | 'right' | 'up' | 'down'): number[] | null {
-    const blank = tiles.indexOf(8);
-    const row = Math.floor(blank / GRID);
-    const col = blank % GRID;
-    // The tile that swaps into the blank is opposite to swipe direction
-    let tr = row, tc = col;
-    if (dir === 'left') tc = col + 1; // tile to the RIGHT of blank slides left
-    if (dir === 'right') tc = col - 1; // tile to the LEFT slides right
-    if (dir === 'up') tr = row + 1; // tile BELOW slides up
-    if (dir === 'down') tr = row - 1; // tile ABOVE slides down
-    if (tr < 0 || tr >= GRID || tc < 0 || tc >= GRID) return null;
-    const tileIdx = tr * GRID + tc;
-    const next = [...tiles];
-    [next[blank], next[tileIdx]] = [next[tileIdx], next[blank]];
-    return next;
-}
-
-// ── Props ─────────────────────────────────────────────────────────────────────
-interface FacePuzzleProps {
-    playerId?: string;
-}
+// ── Props / types ─────────────────────────────────────────────────────────────
+interface FacePuzzleProps { trackingData: HandTrackingData; playerId?: string; }
+interface SwipeOrigin { x: number; y: number; row: number; col: number; }
+interface Anim { tile: number; fromI: number; toI: number; start: number; }
+interface BBox { minX: number; minY: number; maxX: number; maxY: number; }
 
 // ── Component ─────────────────────────────────────────────────────────────────
-export const FacePuzzle: React.FC<FacePuzzleProps> = () => {
+export const FacePuzzle: React.FC<FacePuzzleProps> = ({ trackingData }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const videoRef = useRef<HTMLVideoElement>(null);
-    const handsRef = useRef<Hands | null>(null);
-    const camRef = useRef<Camera | null>(null);
     const rafRef = useRef<number>(0);
+    const streamRef = useRef<MediaStream | null>(null);
 
-    // ── Game state refs (avoid stale closures inside rAF) ─────────────────────
-    const phaseRef = useRef<Phase>('drawing');
+    // ── Game state refs ───────────────────────────────────────────────────────
+    const phaseRef = useRef<Phase>('draw');
     const tilesRef = useRef<number[]>([0, 1, 2, 3, 4, 5, 6, 7, 8]);
-    const timerRef = useRef<number>(GAME_TIME);
+    const tileImgsRef = useRef<ImageBitmap[]>([]);
     const timerStartRef = useRef<number>(0);
-    const swipeCoolRef = useRef(false);
-    const tileImagesRef = useRef<ImageBitmap[]>([]);
-    const gestureRef = useRef<GestureState | null>(null);
+    const timerRef = useRef<number>(GAME_TIME);
 
-    // Trail of index finger positions for square detection
-    const trailRef = useRef<{ x: number; y: number }[]>([]);
-    const lastPalmRef = useRef<{ x: number; y: number } | null>(null);
+    // DRAW phase state
+    const bboxRef = useRef<BBox | null>(null);     // canvas-pixel bbox
+    const peaceCountRef = useRef<number>(0);             // consecutive peace frames
+    const tooSmallRef = useRef<boolean>(false);        // show "too small" msg
+    const captureFlashRef = useRef<number>(0);            // timestamp for flash
 
-    // Slide animation
-    const animRef = useRef<{ tile: number; dx: number; dy: number; progress: number } | null>(null);
+    // SOLVE phase state
+    const swipeRef = useRef<SwipeOrigin | null>(null);
+    const animRef = useRef<Anim | null>(null);
+    const flashTileRef = useRef<number>(-1);            // tile index flashing green
+    const flashTileTs = useRef<number>(0);
 
-    // ── React state (re-renders only for phase transitions) ───────────────────
-    const [phase, setPhase] = useState<Phase>('drawing');
-    const [handReady, setHandReady] = useState(false);
-    const [camError, setCamError] = useState(false);
+    // Shared
+    const trackingRef = useRef(trackingData);
 
-    // ── Capture face from video ───────────────────────────────────────────────
-    const captureFace = useCallback(async () => {
+    // React state (for DOM only)
+    const [phase, setPhase] = useState<Phase>('draw');
+    const [videoReady, setVideoReady] = useState(false);
+
+    useEffect(() => { trackingRef.current = trackingData; }, [trackingData]);
+
+    // ── Camera stream (display + capture — no MediaPipe) ──────────────────────
+    useEffect(() => {
+        let cancelled = false;
+        navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: false })
+            .then(stream => {
+                if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+                streamRef.current = stream;
+                const v = videoRef.current;
+                if (v) {
+                    v.srcObject = stream;
+                    v.onloadedmetadata = () => v.play().then(() => setVideoReady(true));
+                }
+            })
+            .catch(e => console.error('FacePuzzle cam:', e));
+        return () => { cancelled = true; streamRef.current?.getTracks().forEach(t => t.stop()); };
+    }, []);
+
+    // ── Face capture from bbox ────────────────────────────────────────────────
+    const captureFace = useCallback(async (W: number, H: number) => {
         const video = videoRef.current;
-        if (!video) return;
+        const bb = bboxRef.current;
+        if (!video || video.readyState < 2 || !bb) return;
 
-        // Draw video to offscreen canvas (mirrored to match display)
+        let { minX, minY, maxX, maxY } = bb;
+
+        // Clamp to canvas
+        minX = Math.max(0, minX); minY = Math.max(0, minY);
+        maxX = Math.min(W, maxX); maxY = Math.min(H, maxY);
+        let cW = maxX - minX, cH = maxY - minY;
+
+        // Make square
+        const sq = Math.max(cW, cH);
+        const cX = minX - (sq - cW) / 2;
+        const cY = minY - (sq - cH) / 2;
+        cW = cH = sq;
+
+        // Draw mirrored video to offscreen canvas at display resolution
         const off = document.createElement('canvas');
-        const vw = video.videoWidth || 640;
-        const vh = video.videoHeight || 480;
-        off.width = vw;
-        off.height = vh;
-        const octx = off.getContext('2d')!;
-        // Mirror horizontally to match camera display
-        octx.translate(vw, 0);
-        octx.scale(-1, 1);
-        octx.drawImage(video, 0, 0, vw, vh);
+        off.width = W; off.height = H;
+        const oc = off.getContext('2d')!;
+        oc.translate(W, 0); oc.scale(-1, 1);
+        oc.drawImage(video, 0, 0, W, H);
 
-        // Crop centered square (80% of shorter dimension, face region)
-        const size = Math.min(vw, vh) * 0.72;
-        const sx = (vw - size) / 2;
-        const sy = (vh - size) / 2 - vh * 0.04; // slight upward offset for face
-
-        // Tile size
-        const tileSize = Math.floor(size / GRID);
-
+        const ts = Math.max(1, Math.floor(sq / GRID));
         const bitmaps: ImageBitmap[] = [];
         for (let i = 0; i < TILE_COUNT - 1; i++) {
-            const tc = i % GRID;
-            const tr = Math.floor(i / GRID);
-            const bm = await createImageBitmap(off, sx + tc * tileSize, sy + tr * tileSize, tileSize, tileSize);
-            bitmaps.push(bm);
+            const tc2 = i % GRID, tr2 = Math.floor(i / GRID);
+            const sx = Math.max(0, cX + tc2 * ts);
+            const sy = Math.max(0, cY + tr2 * ts);
+            const sw = Math.min(ts, W - sx);
+            const sh = Math.min(ts, H - sy);
+            try {
+                bitmaps.push(await createImageBitmap(off, sx, sy, Math.max(1, sw), Math.max(1, sh)));
+            } catch {
+                const fb = document.createElement('canvas'); fb.width = fb.height = ts;
+                bitmaps.push(await createImageBitmap(fb));
+            }
         }
-        // index 8 = blank (null placeholder — we push undefined but handle it in draw)
-        tileImagesRef.current = bitmaps;
 
-        // Shuffle tiles
-        tilesRef.current = shuffle([0, 1, 2, 3, 4, 5, 6, 7, 8]);
-        phaseRef.current = 'captured';
-        setPhase('captured');
-
-        // Start timer after a short preview delay
-        setTimeout(() => {
-            phaseRef.current = 'playing';
-            timerStartRef.current = Date.now();
-            timerRef.current = GAME_TIME;
-            setPhase('playing');
-        }, 1800);
+        tileImgsRef.current = bitmaps;
+        tilesRef.current = makeShuffle();
+        swipeRef.current = null;
+        animRef.current = null;
+        phaseRef.current = 'solve';
+        timerStartRef.current = Date.now();
+        timerRef.current = GAME_TIME;
+        setPhase('solve');
     }, []);
 
-    // ── Swipe processing ──────────────────────────────────────────────────────
-    const processSwipe = useCallback((palm: { x: number; y: number }) => {
-        if (phaseRef.current !== 'playing') return;
-        if (swipeCoolRef.current) return;
-
-        const last = lastPalmRef.current;
-        if (!last) {
-            lastPalmRef.current = palm;
-            return;
-        }
-
-        const dx = palm.x - last.x;
-        const dy = palm.y - last.y;
-        lastPalmRef.current = palm;
-
-        const absDx = Math.abs(dx);
-        const absDy = Math.abs(dy);
-
-        if (Math.max(absDx, absDy) < SWIPE_THRESHOLD) return;
-
-        let dir: 'left' | 'right' | 'up' | 'down' | null = null;
-        // Note: video is mirrored, so left/right are swapped in landmark space
-        if (absDx > absDy) {
-            dir = dx > 0 ? 'left' : 'right'; // mirrored
-        } else {
-            dir = dy > 0 ? 'down' : 'up';
-        }
-
-        const next = applySwipe(tilesRef.current, dir);
-        if (!next) return;
-
-        // Start slide animation
-        const blank = tilesRef.current.indexOf(8);
-        const moved = next.indexOf(8); // position blank moved to
-        const tileMoved = tilesRef.current[moved]; // tile that moved
-        const bRow = Math.floor(blank / GRID);
-        const bCol = blank % GRID;
-        const mRow = Math.floor(moved / GRID);
-        const mCol = moved % GRID;
-        animRef.current = {
-            tile: tileMoved,
-            dx: (bCol - mCol),
-            dy: (bRow - mRow),
-            progress: 0,
-        };
-
-        tilesRef.current = next;
-        swipeCoolRef.current = true;
-        setTimeout(() => { swipeCoolRef.current = false; }, SWIPE_COOLDOWN);
-
-        if (isSolved(next)) {
-            setTimeout(() => {
-                phaseRef.current = 'won';
-                setPhase('won');
-            }, 350);
-        }
-    }, []);
-
-    // ── Square detection from finger trail ────────────────────────────────────
-    const detectSquare = useCallback((trail: { x: number; y: number }[]): boolean => {
-        if (trail.length < 8) return false;
-        const xs = trail.map(p => p.x);
-        const ys = trail.map(p => p.y);
-        const minX = Math.min(...xs), maxX = Math.max(...xs);
-        const minY = Math.min(...ys), maxY = Math.max(...ys);
-        const w = maxX - minX;
-        const h = maxY - minY;
-        if (w < SQUARE_MIN_SIZE || h < SQUARE_MIN_SIZE) return false;
-        const ratio = Math.min(w, h) / Math.max(w, h);
-        return ratio > 0.55; // fairly square bounding box
-    }, []);
-
-    // ── Draw frame ────────────────────────────────────────────────────────────
+    // ── Main rAF render + logic ───────────────────────────────────────────────
     const drawFrame = useCallback(() => {
         const canvas = canvasRef.current;
         const video = videoRef.current;
         if (!canvas || !video) return;
-
         const W = canvas.width, H = canvas.height;
         const ctx = canvas.getContext('2d')!;
 
-        // ── 1. Camera feed (mirrored) ─────────────────────────────────────────
-        ctx.save();
-        ctx.scale(-1, 1);
-        ctx.drawImage(video, -W, 0, W, H);
-        ctx.restore();
-
-        // ── 2. Vignette ───────────────────────────────────────────────────────
-        const vg = ctx.createRadialGradient(W / 2, H / 2, H * 0.2, W / 2, H / 2, H * 0.85);
-        vg.addColorStop(0, 'rgba(0,0,0,0)');
-        vg.addColorStop(1, 'rgba(0,0,0,0.50)');
-        ctx.fillStyle = vg;
-        ctx.fillRect(0, 0, W, H);
-
-        const gs = gestureRef.current;
-
-        // ── 3. Hand skeleton ──────────────────────────────────────────────────
-        if (gs) {
-            // We need raw landmarks — store them on gestureRef via onResults
-            const rawLm = (gs as any)._rawLandmarks as HandLandmark[] | undefined;
-            if (rawLm) {
-                drawHandSkeleton(ctx, rawLm, W, H, gs.isPinching);
-            }
+        // ── Camera feed (mirrored) ────────────────────────────────────────────
+        if (video.readyState >= 2) {
+            ctx.save(); ctx.scale(-1, 1); ctx.drawImage(video, -W, 0, W, H); ctx.restore();
+        } else {
+            ctx.fillStyle = '#111'; ctx.fillRect(0, 0, W, H);
         }
 
-        const currentPhase = phaseRef.current;
+        // ── Vignette ─────────────────────────────────────────────────────────
+        const vg = ctx.createRadialGradient(W / 2, H / 2, H * 0.15, W / 2, H / 2, H * 0.82);
+        vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.50)');
+        ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
 
-        // ── 4. Phase-specific overlays ────────────────────────────────────────
-        if (currentPhase === 'drawing') {
-            drawDrawingPhase(ctx, W, H);
-        } else if (currentPhase === 'captured' || currentPhase === 'playing') {
-            drawPuzzle(ctx, W, H);
-            if (currentPhase === 'playing') drawTimer(ctx, W, H);
-        } else if (currentPhase === 'won') {
-            drawPuzzle(ctx, W, H);
-            drawEndScreen(ctx, W, H, true);
-        } else if (currentPhase === 'lost') {
-            drawPuzzle(ctx, W, H);
-            drawEndScreen(ctx, W, H, false);
-        }
-
-        // ── 5. Cursor at index finger ─────────────────────────────────────────
-        if (gs) {
-            const { x: cx, y: cy } = landmarkToCanvas(gs.indexTip, W, H);
-            ctx.save();
-            ctx.shadowColor = '#00E5FF'; ctx.shadowBlur = 20;
-            ctx.strokeStyle = '#00E5FF'; ctx.lineWidth = 2;
-            ctx.beginPath(); ctx.arc(cx, cy, 12, 0, Math.PI * 2); ctx.stroke();
-            ctx.shadowBlur = 10;
-            ctx.fillStyle = '#00E5FF';
-            ctx.beginPath(); ctx.arc(cx, cy, 5, 0, Math.PI * 2); ctx.fill();
-            ctx.restore();
-        }
-
-        // ── Check timer ───────────────────────────────────────────────────────
-        if (currentPhase === 'playing') {
-            const elapsed = (Date.now() - timerStartRef.current) / 1000;
-            timerRef.current = Math.max(0, GAME_TIME - elapsed);
-            if (timerRef.current <= 0) {
-                phaseRef.current = 'lost';
-                setPhase('lost');
-            }
-        }
-    }, []);
-
-    // ── Drawing phase overlay ─────────────────────────────────────────────────
-    const drawDrawingPhase = useCallback((ctx: CanvasRenderingContext2D, W: number, H: number) => {
-        const trail = trailRef.current;
-
-        // Draw trail
-        if (trail.length > 1) {
-            ctx.save();
-            ctx.strokeStyle = 'rgba(0, 229, 255, 0.8)';
-            ctx.lineWidth = 3;
-            ctx.shadowColor = '#00E5FF';
-            ctx.shadowBlur = 12;
-            ctx.lineCap = 'round';
-            ctx.lineJoin = 'round';
-            ctx.beginPath();
-            ctx.moveTo(trail[0].x * W, trail[0].y * H);
-            for (let i = 1; i < trail.length; i++) {
-                ctx.lineTo(trail[i].x * W, trail[i].y * H);
-            }
-            ctx.stroke();
-
-            // Bounding rect of trail
-            const xs = trail.map(p => p.x * W);
-            const ys = trail.map(p => p.y * H);
-            const rx = Math.min(...xs), ry = Math.min(...ys);
-            const rw = Math.max(...xs) - rx, rh = Math.max(...ys) - ry;
-            if (rw > SQUARE_MIN_SIZE * W && rh > SQUARE_MIN_SIZE * H) {
-                const ratio = Math.min(rw, rh) / Math.max(rw, rh);
-                const alpha = Math.min(1, ratio * 1.8);
-                ctx.strokeStyle = `rgba(0, 255, 136, ${alpha})`;
-                ctx.lineWidth = 3;
-                ctx.shadowColor = '#00FF88';
-                ctx.shadowBlur = 20;
-                ctx.setLineDash([8, 6]);
-                ctx.strokeRect(rx, ry, rw, rh);
-                ctx.setLineDash([]);
-            }
-            ctx.restore();
-        }
-
-        // Instructions panel
-        ctx.save();
-        const panW = Math.min(W * 0.7, 480), panH = 120;
-        const panX = (W - panW) / 2, panY = H - panH - 30;
-        ctx.fillStyle = 'rgba(0,0,0,0.72)';
-        ctx.beginPath();
-        (ctx as any).roundRect(panX, panY, panW, panH, 16);
-        ctx.fill();
-        ctx.strokeStyle = '#00E5FF'; ctx.lineWidth = 1.5;
-        ctx.stroke();
-
-        ctx.textAlign = 'center';
-        ctx.fillStyle = '#00E5FF';
-        ctx.font = `bold ${Math.round(W * 0.025)}px "Segoe UI", sans-serif`;
-        ctx.fillText('✋ Trace a square with your index finger!', W / 2, panY + 38);
-        ctx.fillStyle = 'rgba(255,255,255,0.7)';
-        ctx.font = `${Math.round(W * 0.018)}px "Segoe UI", sans-serif`;
-        ctx.fillText('Move your finger in a □ shape to capture your face', W / 2, panY + 66);
-        ctx.fillStyle = 'rgba(255,255,255,0.4)';
-        ctx.font = `${Math.round(W * 0.015)}px "Segoe UI", sans-serif`;
-        ctx.fillText('Keep your face centered in the frame', W / 2, panY + 94);
-        ctx.restore();
-    }, []);
-
-    // ── Puzzle overlay ────────────────────────────────────────────────────────
-    const drawPuzzle = useCallback((ctx: CanvasRenderingContext2D, W: number, H: number) => {
-        const images = tileImagesRef.current;
-        if (!images.length) return;
-
-        const tiles = tilesRef.current;
-        const anim = animRef.current;
-
-        // Puzzle grid dimensions — centered on canvas
-        const gridSize = Math.min(W, H) * 0.55;
-        const tileSize = gridSize / GRID;
-        const gap = 3;
-        const originX = (W - gridSize) / 2;
-        const originY = (H - gridSize) / 2;
-
-        // Background panel
-        ctx.save();
-        ctx.fillStyle = 'rgba(0,0,0,0.45)';
-        ctx.shadowColor = 'rgba(0,229,255,0.4)'; ctx.shadowBlur = 30;
-        ctx.beginPath();
-        (ctx as any).roundRect(originX - 12, originY - 12, gridSize + 24, gridSize + 24, 14);
-        ctx.fill();
-        ctx.shadowBlur = 0;
-        ctx.strokeStyle = 'rgba(0,229,255,0.6)'; ctx.lineWidth = 2;
-        ctx.stroke();
-        ctx.restore();
-
-        // Advance animation
-        if (anim) {
-            anim.progress = Math.min(1, anim.progress + 0.14);
-            if (anim.progress >= 1) animRef.current = null;
-        }
-
-        // Draw tiles
-        for (let i = 0; i < TILE_COUNT; i++) {
-            const tileVal = tiles[i];
-            if (tileVal === 8) continue; // blank
-
-            const col = i % GRID;
-            const row = Math.floor(i / GRID);
-            let tx = originX + col * tileSize + gap / 2;
-            let ty = originY + row * tileSize + gap / 2;
-            const tw = tileSize - gap;
-            const th = tileSize - gap;
-
-            // Animate sliding tile
-            if (anim && tileVal === anim.tile) {
-                const eased = 1 - Math.pow(1 - anim.progress, 3);
-                tx += anim.dx * tileSize * (1 - eased);
-                ty += anim.dy * tileSize * (1 - eased);
-            }
-
-            const img = images[tileVal];
-            if (!img) continue;
-
-            ctx.save();
-            // Rounded clip for tile
-            ctx.beginPath();
-            (ctx as any).roundRect(tx, ty, tw, th, 6);
-            ctx.clip();
-            ctx.drawImage(img, tx, ty, tw, th);
-
-            // Subtle border
-            ctx.strokeStyle = 'rgba(0,229,255,0.4)';
-            ctx.lineWidth = 1.5;
-            ctx.stroke();
-            ctx.restore();
-
-            // Tile number (subtle, bottom-right)
-            ctx.save();
-            ctx.font = `bold ${Math.round(tileSize * 0.15)}px "Segoe UI", monospace`;
-            ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
-            ctx.fillStyle = 'rgba(255,255,255,0.35)';
-            ctx.fillText(`${tileVal + 1}`, tx + tw - 4, ty + th - 2);
-            ctx.restore();
-        }
-
-        // Blank cell glow
-        const blankIdx = tiles.indexOf(8);
-        const blankCol = blankIdx % GRID;
-        const blankRow = Math.floor(blankIdx / GRID);
-        const bx = originX + blankCol * tileSize + gap / 2;
-        const by = originY + blankRow * tileSize + gap / 2;
-        ctx.save();
-        ctx.fillStyle = 'rgba(0,229,255,0.08)';
-        ctx.strokeStyle = 'rgba(0,229,255,0.25)';
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([5, 4]);
-        ctx.beginPath();
-        (ctx as any).roundRect(bx, by, tileSize - gap, tileSize - gap, 6);
-        ctx.fill(); ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.restore();
-    }, []);
-
-    // ── Timer overlay ─────────────────────────────────────────────────────────
-    const drawTimer = useCallback((ctx: CanvasRenderingContext2D, W: number, H: number) => {
-        const timeLeft = timerRef.current;
-        const fraction = timeLeft / GAME_TIME;
-        const urgent = timeLeft <= 5;
-
-        const cx = W / 2;
-        const cy = H * 0.08;
-        const r = 28;
-
-        // Background arc
-        ctx.save();
-        ctx.beginPath();
-        ctx.arc(cx, cy, r + 4, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(0,0,0,0.5)';
-        ctx.fill();
-
-        // Progress arc
-        ctx.strokeStyle = urgent ? '#FF4757' : '#00E5FF';
-        ctx.lineWidth = 5;
-        ctx.shadowColor = urgent ? '#FF4757' : '#00E5FF';
-        ctx.shadowBlur = 14;
-        ctx.lineCap = 'round';
-        ctx.beginPath();
-        ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + fraction * 2 * Math.PI);
-        ctx.stroke();
-        ctx.shadowBlur = 0;
-
-        // Background ring
-        ctx.strokeStyle = 'rgba(255,255,255,0.1)';
-        ctx.lineWidth = 5;
-        ctx.beginPath();
-        ctx.arc(cx, cy, r, 0, Math.PI * 2);
-        ctx.stroke();
-
-        // Text
-        ctx.fillStyle = urgent ? '#FF4757' : '#fff';
-        ctx.font = `bold ${r * 0.85}px "Segoe UI", sans-serif`;
-        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillText(Math.ceil(timeLeft).toString(), cx, cy);
-
-        ctx.restore();
-
-        // Swipe hint (bottom of puzzle)
-        const gridSize = Math.min(W, H) * 0.55;
-        const panY = (H - gridSize) / 2 + gridSize + 20;
-        ctx.save();
-        ctx.textAlign = 'center';
-        ctx.fillStyle = 'rgba(255,255,255,0.45)';
-        ctx.font = `${Math.round(W * 0.017)}px "Segoe UI", sans-serif`;
-        ctx.fillText('👋 Swipe LEFT · RIGHT · UP · DOWN to slide tiles', W / 2, panY + 14);
-        ctx.restore();
-    }, []);
-
-    // ── End screen ────────────────────────────────────────────────────────────
-    const drawEndScreen = useCallback((ctx: CanvasRenderingContext2D, W: number, H: number, won: boolean) => {
-        ctx.save();
-        ctx.fillStyle = won ? 'rgba(0,20,0,0.72)' : 'rgba(20,0,0,0.72)';
-        ctx.fillRect(0, 0, W, H);
-
-        const emoji = won ? '🎉' : '⏰';
-        const title = won ? 'PUZZLE SOLVED!' : 'TIME\'S UP!';
-        const sub = won ? 'You reassembled your face in time!' : 'Better luck next time — try again!';
-        const color = won ? '#00FF88' : '#FF4757';
-
-        ctx.textAlign = 'center';
-
-        // Emoji
-        ctx.font = `${Math.round(W * 0.09)}px serif`;
-        ctx.fillText(emoji, W / 2, H / 2 - 80);
-
-        // Title
-        ctx.shadowColor = color; ctx.shadowBlur = 40;
-        ctx.fillStyle = color;
-        ctx.font = `bold ${Math.round(W * 0.06)}px "Segoe UI", sans-serif`;
-        ctx.fillText(title, W / 2, H / 2 - 10);
-        ctx.shadowBlur = 0;
-
-        // Sub
-        ctx.fillStyle = 'rgba(255,255,255,0.8)';
-        ctx.font = `${Math.round(W * 0.022)}px "Segoe UI", sans-serif`;
-        ctx.fillText(sub, W / 2, H / 2 + 38);
-
-        // Restart hint
-        ctx.fillStyle = 'rgba(255,255,255,0.4)';
-        ctx.font = `${Math.round(W * 0.018)}px "Segoe UI", sans-serif`;
-        ctx.fillText('✌️ Show peace sign to play again', W / 2, H / 2 + 82);
-
-        ctx.restore();
-    }, []);
-
-    // ── MediaPipe setup ───────────────────────────────────────────────────────
-    useEffect(() => {
-        const hands = new Hands({
-            locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`,
-        });
-        hands.setOptions({
-            maxNumHands: 1,
-            modelComplexity: 1,
-            minDetectionConfidence: 0.72,
-            minTrackingConfidence: 0.55,
+        // ── All hand skeletons ────────────────────────────────────────────────
+        const td = trackingRef.current;
+        td.landmarks.forEach(lm => {
+            const hlm = lm as HandLandmark[];
+            // Simple pinch check inline
+            const pinchDist = Math.hypot(hlm[4].x - hlm[8].x, hlm[4].y - hlm[8].y);
+            drawHandSkeleton(ctx, hlm, W, H, pinchDist < 0.05);
         });
 
-        hands.onResults((results: Results) => {
-            const canvas = canvasRef.current;
-            if (!canvas) return;
-            const W = canvas.width;
+        const p = phaseRef.current;
+        const lm0 = td.landmarks.length ? td.landmarks[0] as HandLandmark[] : null;
 
-            if (!results.multiHandLandmarks?.length) {
-                gestureRef.current = null;
-                lastPalmRef.current = null;
-                return;
-            }
+        // ═══════════════════════════════════════════════════════════════════════
+        // DRAW PHASE
+        // ═══════════════════════════════════════════════════════════════════════
+        if (p === 'draw' || p === 'capturing') {
 
-            const lm = results.multiHandLandmarks[0] as HandLandmark[];
-            const gs = classifyGesture(lm);
-            // Attach raw landmarks for skeleton draw
-            (gs as any)._rawLandmarks = lm;
-            gestureRef.current = gs;
+            if (p === 'draw' && lm0) {
+                // Mirror fingertip to canvas coords
+                const ftx = (1 - lm0[INDEX_TIP].x) * W;
+                const fty = lm0[INDEX_TIP].y * H;
 
-            const phase = phaseRef.current;
+                // Expand bounding box
+                const bb = bboxRef.current;
+                if (!bb) {
+                    bboxRef.current = { minX: ftx, minY: fty, maxX: ftx, maxY: fty };
+                } else {
+                    bb.minX = Math.min(bb.minX, ftx);
+                    bb.minY = Math.min(bb.minY, fty);
+                    bb.maxX = Math.max(bb.maxX, ftx);
+                    bb.maxY = Math.max(bb.maxY, fty);
+                }
 
-            // ── Drawing phase: track index fingertip trail ────────────────────
-            if (phase === 'drawing') {
-                const tip = gs.indexTip;
-                // Only track when index is reasonably extended (pointing-ish)
-                const trail = trailRef.current;
-                trail.push({ x: 1 - tip.x, y: tip.y }); // mirror x
-                if (trail.length > TRAIL_MAX) trail.shift();
-
-                if (detectSquare(trail)) {
-                    trailRef.current = [];
-                    captureFace();
+                // Peace sign detection for capture trigger
+                if (isPeaceSign(lm0)) {
+                    peaceCountRef.current++;
+                    if (peaceCountRef.current >= PEACE_HOLD && bboxRef.current) {
+                        tooSmallRef.current = false;
+                        phaseRef.current = 'capturing';
+                        setPhase('capturing');
+                        captureFlashRef.current = Date.now();
+                        captureFace(W, H);
+                    }
+                } else {
+                    peaceCountRef.current = 0;
                 }
             }
 
-            // ── Playing phase: detect palm swipes ─────────────────────────────
-            if (phase === 'playing') {
-                const palm = lm[9]; // landmark 9 = palm center
-                processSwipe({ x: 1 - palm.x, y: palm.y });
+            // ── Draw bbox preview ─────────────────────────────────────────────
+            const bb = bboxRef.current;
+            if (bb) {
+                const bw = bb.maxX - bb.minX, bh = bb.maxY - bb.minY;
+                ctx.save();
+                ctx.strokeStyle = 'rgba(0,255,136,0.9)';
+                ctx.lineWidth = 3;
+                ctx.shadowColor = '#00FF88';
+                ctx.shadowBlur = 18;
+                ctx.setLineDash([12, 8]);
+                ctx.strokeRect(bb.minX, bb.minY, bw, bh);
+                ctx.setLineDash([]);
+                // Corner accents
+                const cs = 16;
+                ctx.shadowBlur = 0;
+                [[bb.minX, bb.minY], [bb.maxX, bb.minY], [bb.maxX, bb.maxY], [bb.minX, bb.maxY]]
+                    .forEach(([cx2, cy2]) => {
+                        ctx.fillStyle = 'rgba(0,255,136,0.9)';
+                        ctx.beginPath(); ctx.arc(cx2, cy2, cs / 2, 0, Math.PI * 2); ctx.fill();
+                    });
+                ctx.restore();
+
+                // Size label inside box
+                ctx.save();
+                ctx.font = `bold ${Math.round(Math.min(bw, bh) * 0.08)}px "Segoe UI", sans-serif`;
+                ctx.fillStyle = 'rgba(255,255,255,0.55)';
+                ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                ctx.fillText(`${Math.round(bw)}×${Math.round(bh)}`, bb.minX + bw / 2, bb.minY + bh / 2);
+                ctx.restore();
             }
 
-            // ── Peace sign = restart ──────────────────────────────────────────
-            if ((phase === 'won' || phase === 'lost') && gs.gesture === 'peace') {
-                phaseRef.current = 'drawing';
-                trailRef.current = [];
-                tilesRef.current = [0, 1, 2, 3, 4, 5, 6, 7, 8];
-                tileImagesRef.current = [];
-                timerRef.current = GAME_TIME;
-                animRef.current = null;
-                setPhase('drawing');
+            // ── Fingertip dot ─────────────────────────────────────────────────
+            if (lm0) {
+                const ftx2 = (1 - lm0[INDEX_TIP].x) * W;
+                const fty2 = lm0[INDEX_TIP].y * H;
+                ctx.save();
+                ctx.fillStyle = '#00FF88'; ctx.shadowColor = '#00FF88'; ctx.shadowBlur = 14;
+                ctx.beginPath(); ctx.arc(ftx2, fty2, 10, 0, Math.PI * 2); ctx.fill();
+                ctx.restore();
             }
 
-            void W; // suppress unused warning
-        });
+            // ── Peace progress arc ─────────────────────────────────────────────
+            if (lm0 && peaceCountRef.current > 0) {
+                const prog = peaceCountRef.current / PEACE_HOLD;
+                const pcx = W / 2, pcy = H - 60, pr = 22;
+                ctx.save();
+                ctx.strokeStyle = '#00FF88'; ctx.lineWidth = 5;
+                ctx.shadowColor = '#00FF88'; ctx.shadowBlur = 14;
+                ctx.lineCap = 'round';
+                ctx.beginPath();
+                ctx.arc(pcx, pcy, pr, -Math.PI / 2, -Math.PI / 2 + prog * 2 * Math.PI);
+                ctx.stroke();
+                ctx.fillStyle = '#00FF88';
+                ctx.font = `bold ${Math.round(pr * 0.7)}px "Segoe UI", sans-serif`;
+                ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                ctx.fillText('✌️', pcx, pcy);
+                ctx.restore();
+            }
 
-        handsRef.current = hands;
+            // ── CAPTURING flash ────────────────────────────────────────────────
+            if (captureFlashRef.current) {
+                const fe = Date.now() - captureFlashRef.current;
+                if (fe < 600) {
+                    const fa = 1 - fe / 600;
+                    ctx.save();
+                    ctx.fillStyle = `rgba(0,255,136,${fa * 0.38})`;
+                    ctx.fillRect(0, 0, W, H);
+                    ctx.fillStyle = `rgba(0,255,136,${fa})`;
+                    ctx.font = `bold ${Math.round(W * 0.055)}px "Segoe UI", sans-serif`;
+                    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                    ctx.shadowColor = '#00FF88'; ctx.shadowBlur = 30;
+                    ctx.fillText('📸  CAPTURING…', W / 2, H / 2);
+                    ctx.restore();
+                }
+            }
 
-        if (videoRef.current) {
-            const cam = new Camera(videoRef.current, {
-                onFrame: async () => {
-                    if (videoRef.current && handsRef.current) {
-                        await handsRef.current.send({ image: videoRef.current });
-                    }
-                },
-                width: 1280,
-                height: 720,
-            });
-            cam.start()
-                .then(() => setHandReady(true))
-                .catch(() => setCamError(true));
-            camRef.current = cam;
+            // ── Instruction text (top-center) ─────────────────────────────────
+            ctx.save();
+            const instr = tooSmallRef.current
+                ? '⚠️  Area too small — move finger wider, then ✌️ Peace'
+                : 'Move finger to define area, then ✌️ Peace sign to capture';
+            ctx.font = `${Math.round(W * 0.019)}px "Segoe UI", sans-serif`;
+            const iw = ctx.measureText(instr).width;
+            ctx.fillStyle = 'rgba(0,0,0,0.60)';
+            (ctx as any).roundRect(W / 2 - iw / 2 - 14, 14, iw + 28, 30, 8);
+            ctx.fill();
+            ctx.fillStyle = tooSmallRef.current ? '#FF4757' : '#00E5FF';
+            ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+            ctx.fillText(instr, W / 2, 21);
+            ctx.restore();
+
+            // Reset button (click/tap to reset bbox)
+            if (bb) {
+                ctx.save();
+                ctx.font = `${Math.round(W * 0.016)}px "Segoe UI", sans-serif`;
+                ctx.fillStyle = 'rgba(255,255,255,0.35)';
+                ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+                ctx.fillText('Move finger far to expand  |  Reload to reset', W / 2, H - 12);
+                ctx.restore();
+            }
         }
 
-        return () => {
-            hands.close();
-            camRef.current?.stop();
-        };
-    }, [detectSquare, captureFace, processSwipe]);
+        // ═══════════════════════════════════════════════════════════════════════
+        // SOLVE PHASE
+        // ═══════════════════════════════════════════════════════════════════════
+        if (p === 'solve' || p === 'won' || p === 'lost') {
+            const imgs = tileImgsRef.current;
+            const tiles = tilesRef.current;
 
-    // ── Render loop ───────────────────────────────────────────────────────────
+            // Grid geometry
+            const gridPx = Math.min(W, H) * 0.58;
+            const tileW = gridPx / GRID;
+            const tileH = tileW;
+            const gridL = (W - gridPx) / 2;
+            const gridT = (H - gridPx) / 2;
+            const gap = 4;
+
+            // ── Swipe input ───────────────────────────────────────────────────
+            if (p === 'solve' && lm0 && !animRef.current) {
+                const ftx = (1 - lm0[INDEX_TIP].x) * W;
+                const fty = lm0[INDEX_TIP].y * H;
+                const gc = Math.floor((ftx - gridL) / tileW);
+                const gr = Math.floor((fty - gridT) / tileH);
+                const inG = gc >= 0 && gc < GRID && gr >= 0 && gr < GRID;
+
+                if (!inG) {
+                    swipeRef.current = null;
+                } else {
+                    const tv = tiles[gr * GRID + gc];
+                    const ss = swipeRef.current;
+
+                    if (!ss && tv !== 8) {
+                        // Lock swipe origin on non-blank tile entered
+                        swipeRef.current = { x: ftx, y: fty, row: gr, col: gc };
+                    } else if (ss) {
+                        // Re-anchor if finger moved to a different non-blank tile
+                        if ((ss.row !== gr || ss.col !== gc) && tv !== 8) {
+                            swipeRef.current = { x: ftx, y: fty, row: gr, col: gc };
+                        } else {
+                            const dx = ftx - ss.x;
+                            const dy = fty - ss.y;
+                            const dist = Math.hypot(dx, dy);
+                            if (dist >= SWIPE_THR_PX) {
+                                const dir = Math.abs(dx) > Math.abs(dy)
+                                    ? (dx > 0 ? 'R' : 'L')
+                                    : (dy > 0 ? 'D' : 'U');
+                                const [dr2, dc2] = DIR_MAP[dir];
+                                const bi = tiles.indexOf(8);
+                                const br = Math.floor(bi / GRID), bc = bi % GRID;
+
+                                if (br === ss.row + dr2 && bc === ss.col + dc2) {
+                                    // Valid move — apply
+                                    const next = slideTile(tiles, ss.row, ss.col);
+                                    if (next) {
+                                        const fromI = ss.row * GRID + ss.col;
+                                        animRef.current = { tile: tiles[fromI], fromI, toI: bi, start: Date.now() };
+                                        tilesRef.current = next;
+                                        flashTileRef.current = tiles[fromI];
+                                        flashTileTs.current = Date.now();
+                                        swipeRef.current = null;
+                                        if (isSolved(next)) {
+                                            setTimeout(() => { phaseRef.current = 'won'; setPhase('won'); }, ANIM_MS + 80);
+                                        }
+                                    }
+                                } else {
+                                    swipeRef.current = null;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Peace sign → restart (in solve phase)
+                if (isPeaceSign(lm0)) {
+                    peaceCountRef.current++;
+                    if (peaceCountRef.current >= PEACE_HOLD) {
+                        phaseRef.current = 'draw';
+                        bboxRef.current = null;
+                        tileImgsRef.current = [];
+                        tilesRef.current = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+                        swipeRef.current = null;
+                        animRef.current = null;
+                        flashTileRef.current = -1;
+                        peaceCountRef.current = 0;
+                        tooSmallRef.current = false;
+                        captureFlashRef.current = 0;
+                        setPhase('draw');
+                    }
+                } else {
+                    peaceCountRef.current = 0;
+                }
+            }
+
+            // Won/lost peace restart
+            if ((p === 'won' || p === 'lost') && lm0 && isPeaceSign(lm0)) {
+                peaceCountRef.current++;
+                if (peaceCountRef.current >= PEACE_HOLD) {
+                    phaseRef.current = 'draw';
+                    bboxRef.current = null;
+                    tileImgsRef.current = [];
+                    tilesRef.current = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+                    swipeRef.current = null;
+                    animRef.current = null;
+                    peaceCountRef.current = 0;
+                    tooSmallRef.current = false;
+                    captureFlashRef.current = 0;
+                    setPhase('draw');
+                }
+            } else if (!lm0) {
+                peaceCountRef.current = 0;
+            }
+
+            // Advance animation
+            if (animRef.current) {
+                if (Date.now() - animRef.current.start >= ANIM_MS) animRef.current = null;
+            }
+
+            // ── Panel background ──────────────────────────────────────────────
+            ctx.save();
+            ctx.fillStyle = 'rgba(0,0,0,0.42)';
+            ctx.shadowColor = 'rgba(0,229,255,0.35)'; ctx.shadowBlur = 28;
+            (ctx as any).roundRect(gridL - 14, gridT - 14, gridPx + 28, gridPx + 28, 16);
+            ctx.fill(); ctx.shadowBlur = 0;
+            ctx.strokeStyle = 'rgba(0,229,255,0.55)'; ctx.lineWidth = 2; ctx.stroke();
+            ctx.restore();
+
+            // ── Hover detection ───────────────────────────────────────────────
+            let hRow = -1, hCol = -1;
+            if (lm0 && p === 'solve') {
+                const { x: hfx, y: hfy } = landmarkToCanvas(lm0[INDEX_TIP], W, H);
+                const hc = Math.floor((hfx - gridL) / tileW);
+                const hr = Math.floor((hfy - gridT) / tileH);
+                if (hc >= 0 && hc < GRID && hr >= 0 && hr < GRID) { hRow = hr; hCol = hc; }
+            }
+
+            // ── Tiles ─────────────────────────────────────────────────────────
+            if (imgs.length) {
+                for (let i = 0; i < TILE_COUNT; i++) {
+                    const v = tiles[i];
+                    if (v === 8) continue;
+
+                    const c0 = i % GRID, r0 = Math.floor(i / GRID);
+                    let tx = gridL + c0 * tileW + gap / 2;
+                    let ty = gridT + r0 * tileH + gap / 2;
+                    const tw2 = tileW - gap, th2 = tileH - gap;
+
+                    // Slide animation: interpolate from fromI to toI
+                    if (animRef.current && v === animRef.current.tile) {
+                        const ad = animRef.current;
+                        const prog = Math.min(1, (Date.now() - ad.start) / ANIM_MS);
+                        const eased = 1 - Math.pow(1 - prog, 3);
+                        const fc2 = ad.fromI % GRID, fr2 = Math.floor(ad.fromI / GRID);
+                        const tc2 = ad.toI % GRID, tr2 = Math.floor(ad.toI / GRID);
+                        tx = gridL + (fc2 + (tc2 - fc2) * eased) * tileW + gap / 2;
+                        ty = gridT + (fr2 + (tr2 - fr2) * eased) * tileH + gap / 2;
+                    }
+
+                    const img = imgs[v];
+                    if (!img) continue;
+
+                    ctx.save();
+                    ctx.beginPath();
+                    (ctx as any).roundRect(tx, ty, tw2, th2, 5);
+                    ctx.clip();
+
+                    // Green flash on recently slid tile
+                    const isFlashing = v === flashTileRef.current && (Date.now() - flashTileTs.current) < 300;
+                    if (isFlashing) {
+                        ctx.drawImage(img, tx, ty, tw2, th2);
+                        ctx.fillStyle = 'rgba(0,255,136,0.35)'; ctx.fillRect(tx, ty, tw2, th2);
+                    } else {
+                        ctx.drawImage(img, tx, ty, tw2, th2);
+                    }
+
+                    // Borders
+                    if (r0 === hRow && c0 === hCol) {
+                        ctx.strokeStyle = 'rgba(0,255,255,0.85)'; ctx.lineWidth = 3;
+                        ctx.shadowColor = 'rgba(0,255,255,0.8)'; ctx.shadowBlur = 12;
+                    } else {
+                        ctx.strokeStyle = 'rgba(0,229,255,0.22)'; ctx.lineWidth = 1;
+                        ctx.shadowBlur = 0;
+                    }
+                    ctx.stroke();
+                    ctx.restore();
+                }
+            }
+
+            // ── Blank cell ────────────────────────────────────────────────────
+            const bi2 = tiles.indexOf(8);
+            const bx2 = gridL + (bi2 % GRID) * tileW + gap / 2;
+            const by2 = gridT + Math.floor(bi2 / GRID) * tileH + gap / 2;
+            ctx.save();
+            ctx.fillStyle = 'rgba(0,229,255,0.06)';
+            ctx.strokeStyle = 'rgba(0,229,255,0.18)'; ctx.lineWidth = 1.5;
+            ctx.setLineDash([6, 5]);
+            (ctx as any).roundRect(bx2, by2, tileW - gap, tileH - gap, 5);
+            ctx.fill(); ctx.stroke(); ctx.setLineDash([]);
+            ctx.restore();
+
+            // ── Directional arrow on hovered tile ─────────────────────────────
+            if (hRow >= 0 && hCol >= 0 && p === 'solve' && tiles[hRow * GRID + hCol] !== 8) {
+                const bi3 = tiles.indexOf(8);
+                const dr3 = Math.floor(bi3 / GRID) - hRow, dc3 = (bi3 % GRID) - hCol;
+                if (Math.abs(dr3) + Math.abs(dc3) === 1) {
+                    const cx3 = gridL + hCol * tileW + tileW / 2;
+                    const cy3 = gridT + hRow * tileH + tileH / 2;
+                    const ex3 = cx3 + dc3 * tileW * 0.36;
+                    const ey3 = cy3 + dr3 * tileH * 0.36;
+                    ctx.save();
+                    ctx.strokeStyle = 'rgba(255,215,0,0.85)'; ctx.lineWidth = 3;
+                    ctx.shadowColor = '#FFD700'; ctx.shadowBlur = 10;
+                    ctx.beginPath(); ctx.moveTo(cx3, cy3); ctx.lineTo(ex3, ey3); ctx.stroke();
+                    const ang3 = Math.atan2(ey3 - cy3, ex3 - cx3), as3 = 11;
+                    ctx.beginPath(); ctx.moveTo(ex3, ey3);
+                    ctx.lineTo(ex3 - as3 * Math.cos(ang3 - 0.4), ey3 - as3 * Math.sin(ang3 - 0.4));
+                    ctx.lineTo(ex3 - as3 * Math.cos(ang3 + 0.4), ey3 - as3 * Math.sin(ang3 + 0.4));
+                    ctx.closePath(); ctx.fillStyle = 'rgba(255,215,0,0.85)'; ctx.fill();
+                    ctx.restore();
+                }
+            }
+
+            // ── Swipe progress arrow ──────────────────────────────────────────
+            if (swipeRef.current && lm0 && p === 'solve') {
+                const ss = swipeRef.current;
+                const ftx3 = (1 - lm0[INDEX_TIP].x) * W;
+                const fty3 = lm0[INDEX_TIP].y * H;
+                const prog3 = Math.min(1, Math.hypot(ftx3 - ss.x, fty3 - ss.y) / SWIPE_THR_PX);
+                ctx.save();
+                ctx.strokeStyle = `rgba(255,255,255,${0.3 + prog3 * 0.5})`;
+                ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+                ctx.beginPath(); ctx.moveTo(ss.x, ss.y); ctx.lineTo(ftx3, fty3); ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.restore();
+            }
+
+            // ── Timer ─────────────────────────────────────────────────────────
+            if (p === 'solve') {
+                const elapsed = (Date.now() - timerStartRef.current) / 1000;
+                timerRef.current = Math.max(0, GAME_TIME - elapsed);
+                if (timerRef.current <= 0) { phaseRef.current = 'lost'; setPhase('lost'); }
+
+                const t2 = timerRef.current, f2 = t2 / GAME_TIME, ug2 = t2 <= 5;
+                const tcx = W / 2, tcy = H * 0.07, r2 = 26;
+                ctx.save();
+                ctx.beginPath(); ctx.arc(tcx, tcy, r2 + 6, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fill();
+                ctx.strokeStyle = 'rgba(255,255,255,0.10)'; ctx.lineWidth = 5;
+                ctx.beginPath(); ctx.arc(tcx, tcy, r2, 0, Math.PI * 2); ctx.stroke();
+                ctx.strokeStyle = ug2 ? '#FF4757' : '#00E5FF'; ctx.lineWidth = 5;
+                ctx.lineCap = 'round'; ctx.shadowColor = ug2 ? '#FF4757' : '#00E5FF'; ctx.shadowBlur = 16;
+                ctx.beginPath(); ctx.arc(tcx, tcy, r2, -Math.PI / 2, -Math.PI / 2 + f2 * 2 * Math.PI); ctx.stroke();
+                ctx.shadowBlur = 0; ctx.fillStyle = ug2 ? '#FF4757' : '#fff';
+                ctx.font = `bold ${Math.round(r2 * 0.88)}px "Segoe UI", sans-serif`;
+                ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                ctx.fillText(Math.ceil(t2).toString(), tcx, tcy);
+                ctx.restore();
+
+                // Tip
+                ctx.save();
+                ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.font = `${Math.round(W * 0.016)}px "Segoe UI", sans-serif`;
+                ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+                ctx.fillText('👆 Hover tile · swipe to slide   |   ✌️ ×10 frames to restart', W / 2, H - 10);
+                ctx.restore();
+            }
+
+            // ── Win / Lose overlay ────────────────────────────────────────────
+            if (p === 'won' || p === 'lost') {
+                const won = p === 'won';
+                ctx.save();
+                ctx.fillStyle = won ? 'rgba(0,30,0,0.76)' : 'rgba(30,0,0,0.76)';
+                ctx.fillRect(0, 0, W, H);
+                ctx.textAlign = 'center';
+                ctx.font = `${Math.round(W * 0.09)}px serif`;
+                ctx.fillText(won ? '🎉' : '⏰', W / 2, H / 2 - 82);
+                const col = won ? '#00FF88' : '#FF4757';
+                ctx.shadowColor = col; ctx.shadowBlur = 40; ctx.fillStyle = col;
+                ctx.font = `bold ${Math.round(W * 0.062)}px "Segoe UI", sans-serif`;
+                ctx.fillText(won ? 'PUZZLE SOLVED!' : "TIME'S UP!", W / 2, H / 2 - 8);
+                ctx.shadowBlur = 0; ctx.fillStyle = 'rgba(255,255,255,0.72)';
+                ctx.font = `${Math.round(W * 0.02)}px "Segoe UI", sans-serif`;
+                ctx.fillText(won ? 'You reassembled your face!' : 'Better luck next time', W / 2, H / 2 + 38);
+                ctx.fillStyle = 'rgba(255,255,255,0.38)';
+                ctx.font = `${Math.round(W * 0.016)}px "Segoe UI", sans-serif`;
+                ctx.fillText('✌️  Hold peace sign to play again', W / 2, H / 2 + 76);
+                ctx.restore();
+            }
+        }
+
+        // ── Index-finger cursor (always on top) ───────────────────────────────
+        if (lm0) {
+            const { x: cx, y: cy } = landmarkToCanvas(lm0[INDEX_TIP], W, H);
+            ctx.save();
+            ctx.shadowColor = '#FFD700'; ctx.shadowBlur = 16;
+            ctx.strokeStyle = '#FFD700'; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.arc(cx, cy, 10, 0, Math.PI * 2); ctx.stroke();
+            ctx.fillStyle = '#FFD700';
+            ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI * 2); ctx.fill();
+            ctx.restore();
+        }
+    }, [captureFace]);
+
+    // ── rAF loop ──────────────────────────────────────────────────────────────
     useEffect(() => {
         let running = true;
-        const loop = () => {
-            if (!running) return;
-            drawFrame();
-            rafRef.current = requestAnimationFrame(loop);
-        };
+        const loop = () => { if (!running) return; drawFrame(); rafRef.current = requestAnimationFrame(loop); };
         loop();
-        return () => {
-            running = false;
-            cancelAnimationFrame(rafRef.current);
-        };
+        return () => { running = false; cancelAnimationFrame(rafRef.current); };
     }, [drawFrame]);
 
     // ── Canvas resize ─────────────────────────────────────────────────────────
     useEffect(() => {
         const resize = () => {
-            const canvas = canvasRef.current;
-            if (!canvas) return;
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight;
+            const c = canvasRef.current; if (!c) return;
+            c.width = window.innerWidth; c.height = window.innerHeight;
         };
         resize();
         window.addEventListener('resize', resize);
         return () => window.removeEventListener('resize', resize);
     }, []);
 
-    // ── Render ────────────────────────────────────────────────────────────────
+    // ── DOM ───────────────────────────────────────────────────────────────────
     return (
         <div style={{ position: 'fixed', inset: 0, background: '#000', overflow: 'hidden' }}>
-            {/* Hidden video */}
-            <video
-                ref={videoRef} autoPlay playsInline muted
-                style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', width: 1, height: 1 }}
-            />
+            <video ref={videoRef} autoPlay playsInline muted
+                style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', width: 1, height: 1 }} />
+            <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: '100%' }} />
 
-            {/* Single canvas — everything drawn here */}
-            <canvas
-                ref={canvasRef}
-                style={{ display: 'block', width: '100%', height: '100%' }}
-            />
-
-            {/* Phase badge top-right */}
-            {handReady && (
+            {/* Phase badge */}
+            {videoReady && (
                 <div style={{
-                    position: 'absolute', top: 16, right: 20,
-                    background: 'rgba(0,0,0,0.65)', border: '1.5px solid rgba(0,229,255,0.4)',
-                    borderRadius: 10, padding: '6px 14px',
-                    fontFamily: '"Segoe UI", sans-serif', fontSize: 13,
+                    position: 'absolute', top: 14, right: 18,
+                    background: 'rgba(0,0,0,0.62)', border: '1.5px solid rgba(0,229,255,0.35)',
+                    borderRadius: 9, padding: '5px 14px',
+                    fontFamily: '"Segoe UI", sans-serif', fontSize: 13, fontWeight: 700,
                     color: phase === 'won' ? '#00FF88' : phase === 'lost' ? '#FF4757' : '#00E5FF',
-                    fontWeight: 'bold', letterSpacing: '0.05em',
                 }}>
-                    {phase === 'drawing' && '✋ Draw a Square'}
-                    {phase === 'captured' && '📸 Face Captured!'}
-                    {phase === 'playing' && '🧩 Solve the Puzzle!'}
+                    {phase === 'draw' && '✋ Define Area → ✌️ Capture'}
+                    {phase === 'capturing' && '📸 Capturing…'}
+                    {phase === 'solve' && '🧩 Solve the Puzzle!'}
                     {phase === 'won' && '🏆 You Won!'}
-                    {phase === 'lost' && '💀 Time\'s Up!'}
+                    {phase === 'lost' && "💀 Time's Up!"}
                 </div>
             )}
 
-            {/* Loading overlay */}
-            {!handReady && !camError && (
+            {/* Loading */}
+            {!videoReady && (
                 <div style={{
                     position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
                     alignItems: 'center', justifyContent: 'center',
-                    background: 'rgba(0,0,0,0.88)', color: '#fff',
-                    fontFamily: '"Segoe UI", sans-serif', zIndex: 10,
+                    background: 'rgba(0,0,0,0.9)', fontFamily: '"Segoe UI", sans-serif', zIndex: 10,
                 }}>
-                    <div style={{
-                        width: 56, height: 56, border: '4px solid #1a1a2e',
-                        borderTop: '4px solid #00E5FF', borderRadius: '50%',
-                        animation: 'spin 0.9s linear infinite', marginBottom: 24,
-                    }} />
-                    <h2 style={{ margin: '0 0 8px', color: '#00E5FF', fontSize: 24 }}>
-                        🧩 Face Puzzle
-                    </h2>
-                    <p style={{ color: '#666', margin: 0, fontSize: 14 }}>
-                        Initialising camera &amp; hand tracking…
-                    </p>
-                    <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-                </div>
-            )}
-
-            {/* Camera error */}
-            {camError && (
-                <div style={{
-                    position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
-                    alignItems: 'center', justifyContent: 'center',
-                    background: 'rgba(0,0,0,0.92)', color: '#FF4757',
-                    fontFamily: '"Segoe UI", sans-serif', gap: 12, zIndex: 10,
-                }}>
-                    <span style={{ fontSize: 48 }}>📷</span>
-                    <h2 style={{ margin: 0 }}>Camera Access Denied</h2>
-                    <p style={{ color: '#888', margin: 0 }}>Please allow camera access and reload the page.</p>
+                    <div style={{ width: 52, height: 52, borderRadius: '50%', border: '4px solid #1a1a2e', borderTop: '4px solid #00E5FF', animation: 'spin .85s linear infinite', marginBottom: 20 }} />
+                    <h2 style={{ margin: '0 0 6px', color: '#00E5FF', fontSize: 22 }}>🧩 Face Puzzle</h2>
+                    <p style={{ color: '#555', margin: 0, fontSize: 13 }}>Accessing camera…</p>
+                    <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
                 </div>
             )}
         </div>

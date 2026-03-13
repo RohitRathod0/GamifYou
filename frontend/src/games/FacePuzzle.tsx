@@ -99,6 +99,9 @@ export const FacePuzzle: React.FC<FacePuzzleProps> = ({ trackingData }) => {
     const peaceCountRef = useRef<number>(0);             // consecutive peace frames
     const tooSmallRef = useRef<boolean>(false);        // show "too small" msg
     const captureFlashRef = useRef<number>(0);            // timestamp for flash
+    // ── Infinite-loop guards ──────────────────────────────────────────────────
+    const captureTriggered = useRef<boolean>(false);   // fires capture at most once per DRAW session
+    const lastPeaceTimeRef = useRef<number>(0);         // timestamp of last peace-sign action (cooldown)
 
     // SOLVE phase state
     const swipeRef = useRef<SwipeOrigin | null>(null);
@@ -137,6 +140,12 @@ export const FacePuzzle: React.FC<FacePuzzleProps> = ({ trackingData }) => {
         const video = videoRef.current;
         const bb = bboxRef.current;
         if (!video || video.readyState < 2 || !bb) return;
+
+        // ── Fix 2: transition to SOLVE *before* any async work so the rAF loop
+        //    sees the new phase on the very next frame and skips DRAW logic. ──
+        phaseRef.current = 'capturing';
+        setPhase('capturing');
+        captureFlashRef.current = Date.now();
 
         let { minX, minY, maxX, maxY } = bb;
 
@@ -178,6 +187,7 @@ export const FacePuzzle: React.FC<FacePuzzleProps> = ({ trackingData }) => {
         tilesRef.current = makeShuffle();
         swipeRef.current = null;
         animRef.current = null;
+        // Transition to SOLVE after tiles are ready
         phaseRef.current = 'solve';
         timerStartRef.current = Date.now();
         timerRef.current = GAME_TIME;
@@ -221,7 +231,8 @@ export const FacePuzzle: React.FC<FacePuzzleProps> = ({ trackingData }) => {
         // ═══════════════════════════════════════════════════════════════════════
         if (p === 'draw' || p === 'capturing') {
 
-            if (p === 'draw' && lm0) {
+            // ── Fix 5: guard DRAW-phase input strictly behind phaseRef ────────
+            if (phaseRef.current === 'draw' && lm0) {
                 // Mirror fingertip to canvas coords
                 const ftx = (1 - lm0[INDEX_TIP].x) * W;
                 const fty = lm0[INDEX_TIP].y * H;
@@ -238,14 +249,21 @@ export const FacePuzzle: React.FC<FacePuzzleProps> = ({ trackingData }) => {
                 }
 
                 // Peace sign detection for capture trigger
+                // Fix 1: captureTriggered guard — fires at most once per DRAW session
+                // Fix 3: 1.5 s cooldown via lastPeaceTimeRef
                 if (isPeaceSign(lm0)) {
-                    peaceCountRef.current++;
-                    if (peaceCountRef.current >= PEACE_HOLD && bboxRef.current) {
-                        tooSmallRef.current = false;
-                        phaseRef.current = 'capturing';
-                        setPhase('capturing');
-                        captureFlashRef.current = Date.now();
-                        captureFace(W, H);
+                    const now = Date.now();
+                    const cooldownOk = now - lastPeaceTimeRef.current >= 1500;
+                    if (cooldownOk && !captureTriggered.current) {
+                        peaceCountRef.current++;
+                        if (peaceCountRef.current >= PEACE_HOLD && bboxRef.current) {
+                            tooSmallRef.current = false;
+                            // Fix 1+2: set guard AND transition phase as the very first action
+                            captureTriggered.current = true;
+                            lastPeaceTimeRef.current = now;
+                            peaceCountRef.current = 0;
+                            captureFace(W, H); // captureFace now sets phaseRef internally
+                        }
                     }
                 } else {
                     peaceCountRef.current = 0;
@@ -438,6 +456,9 @@ export const FacePuzzle: React.FC<FacePuzzleProps> = ({ trackingData }) => {
                         peaceCountRef.current = 0;
                         tooSmallRef.current = false;
                         captureFlashRef.current = 0;
+                        // Fix 1: reset guard so next DRAW session can capture again
+                        captureTriggered.current = false;
+                        lastPeaceTimeRef.current = 0;
                         setPhase('draw');
                     }
                 } else {
@@ -458,6 +479,9 @@ export const FacePuzzle: React.FC<FacePuzzleProps> = ({ trackingData }) => {
                     peaceCountRef.current = 0;
                     tooSmallRef.current = false;
                     captureFlashRef.current = 0;
+                    // Fix 1: reset guard so next DRAW session can capture again
+                    captureTriggered.current = false;
+                    lastPeaceTimeRef.current = 0;
                     setPhase('draw');
                 }
             } else if (!lm0) {

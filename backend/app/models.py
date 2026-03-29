@@ -8,6 +8,7 @@ class GameType(str, Enum):
     AIR_HOCKEY = "air_hockey"
     BALLOON_POP = "balloon_pop"
     CHESS = "chess"
+    SCRIBBLE = "scribble"
 
 
 class PlayerStatus(str, Enum):

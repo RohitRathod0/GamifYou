@@ -32,6 +32,7 @@ from app.models import GameType, WSMessageType
 from app.services.game_service import GameService
 from app.services.gesture_pipeline import GesturePipeline
 from app.services.room_service import RoomService
+from app.games.scribble import ScribbleGame
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ router = APIRouter()
 # ── Pipeline Registry ─────────────────────────────────────────────────────────
 # Keyed by "room_code:player_id" — one pipeline per player per room
 _gesture_pipelines: Dict[str, GesturePipeline] = {}
+_scribble_games: Dict[str, ScribbleGame] = {}
 
 
 # ── Connection Manager ────────────────────────────────────────────────────────
@@ -384,6 +386,127 @@ async def websocket_endpoint(
                     },
                     room_code,
                 )
+
+            # ── SCRIBBLE DRAW ─────────────────────────────────────────────
+            elif message_type.startswith("scribble:"):
+                game = _scribble_games.get(room_code)
+                
+                if message_type == "scribble:start":
+                    room = await RoomService.get_room(room_code)
+                    if room:
+                        usernames = {p.player_id: p.username for p in room.players}
+                        game = ScribbleGame(
+                            room_code=room_code,
+                            player_ids=[p.player_id for p in room.players],
+                            usernames=usernames,
+                            max_rounds=message_data.get("rounds", 3),
+                            round_duration=message_data.get("draw_time", 80),
+                        )
+                        _scribble_games[room_code] = game
+                        await manager.broadcast_to_room(
+                            {"type": "scribble:turn_start", "data": game.start_game()},
+                            room_code,
+                        )
+                        
+                elif message_type == "scribble:stroke":
+                    if game:
+                        game.stroke_history.append(message_data)
+                    await manager.broadcast_to_room(
+                        {
+                            "type": "scribble:stroke",
+                            "data": {
+                                "player_id": player_id,
+                                "points": message_data.get("points", []),
+                                "color": message_data.get("color", "#000000"),
+                                "brush_size": message_data.get("brush_size", 4),
+                                "is_end": message_data.get("is_end", False)
+                            }
+                        },
+                        room_code,
+                        exclude_player=player_id
+                    )
+                        
+                elif message_type == "scribble:clear":
+                    if game:
+                        game.stroke_history = []
+                    await manager.broadcast_to_room(
+                        {"type": "scribble:clear", "data": {"player_id": player_id}},
+                        room_code,
+                        exclude_player=player_id
+                    )
+                        
+                elif message_type == "scribble:guess":
+                    if game:
+                        guess_text = message_data.get("text", "")
+                        result = game.handle_guess(player_id, guess_text)
+                        
+                        # Echo the guess in chat
+                        await manager.broadcast_to_room(
+                            {
+                                "type": "scribble:chat",
+                                "data": {
+                                    "player_id": player_id,
+                                    "username": game.usernames.get(player_id, player_id),
+                                    "text": guess_text,
+                                    "is_guess": True
+                                }
+                            },
+                            room_code
+                        )
+                        
+                        if result.get("type") == "scribble:correct":
+                            await manager.broadcast_to_room(
+                                {"type": "scribble:correct", "data": result},
+                                room_code,
+                            )
+                            if "round_end" in result:
+                                await manager.broadcast_to_room(
+                                    {"type": "scribble:round_end", "data": result["round_end"]},
+                                    room_code
+                                )
+                            
+                elif message_type == "scribble:chat":
+                    username = message_data.get("username", "Unknown")
+                    if game:
+                        username = game.usernames.get(player_id, username)
+                    await manager.broadcast_to_room(
+                        {
+                            "type": "scribble:chat",
+                            "data": {
+                                "player_id": player_id,
+                                "username": username,
+                                "text": message_data.get("text", ""),
+                                "is_guess": False
+                            }
+                        },
+                        room_code
+                    )
+
+                elif message_type == "scribble:get_state":
+                     if game:
+                         await manager.send_personal_message(
+                             {"type": "scribble:state", "data": game.get_state_snapshot()},
+                             room_code,
+                             player_id
+                         )
+                         if game.stroke_history:
+                             await manager.send_personal_message(
+                                 {"type": "scribble:canvas_replay", "data": {"strokes": game.stroke_history}},
+                                 room_code,
+                                 player_id
+                             )
+
+                if game:
+                    hint_update = game.get_hint_update()
+                    if hint_update:
+                        await manager.broadcast_to_room(
+                            {"type": "scribble:hint", "data": hint_update}, room_code
+                        )
+                    timer_expiry = game.check_timer_expired()
+                    if timer_expiry:
+                        await manager.broadcast_to_room(
+                            {"type": "scribble:round_end", "data": timer_expiry}, room_code
+                        )
 
     except WebSocketDisconnect:
         manager.disconnect(room_code, player_id)

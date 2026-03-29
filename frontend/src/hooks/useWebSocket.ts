@@ -5,11 +5,19 @@ interface UseWebSocketProps {
     playerId: string;
     shouldConnect?: boolean;
     onMessage?: (data: any) => void;
+    onScribbleMessage?: (data: any) => void;
 }
 
-export const useWebSocket = ({ roomCode, playerId, shouldConnect = true, onMessage }: UseWebSocketProps) => {
+export const useWebSocket = ({ roomCode, playerId, shouldConnect = true, onMessage, onScribbleMessage }: UseWebSocketProps) => {
     const [isConnected, setIsConnected] = useState(false);
     const wsRef = useRef<WebSocket | null>(null);
+    const onMessageRef = useRef(onMessage);
+    const onScribbleMessageRef = useRef(onScribbleMessage);
+
+    useEffect(() => {
+        onMessageRef.current = onMessage;
+        onScribbleMessageRef.current = onScribbleMessage;
+    }, [onMessage, onScribbleMessage]);
 
     const connect = useCallback(() => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -29,7 +37,12 @@ export const useWebSocket = ({ roomCode, playerId, shouldConnect = true, onMessa
         ws.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
-                onMessage?.(data);
+                if (data.type && data.type.startsWith('scribble:')) {
+                    window.dispatchEvent(new CustomEvent('scribbleMessage', { detail: data }));
+                    onScribbleMessageRef.current?.(data);
+                } else {
+                    onMessageRef.current?.(data);
+                }
             } catch (error) {
                 console.error('Error parsing WebSocket message:', error);
             }
@@ -45,7 +58,7 @@ export const useWebSocket = ({ roomCode, playerId, shouldConnect = true, onMessa
         };
 
         wsRef.current = ws;
-    }, [roomCode, playerId, onMessage]);
+    }, [roomCode, playerId]); // Callback refs omitted intentionally to prevent teardown on render
 
     const sendMessage = useCallback((type: string, data: any) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {

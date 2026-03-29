@@ -46,7 +46,7 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
     const { sendMessage } = useWebSocket({
         roomCode,
         playerId,
-        shouldConnect: !!localStream,
+        shouldConnect: true, // Allow users without camera to join as guessers!
         onMessage: (message) => {
             const { type, data } = message;
 
@@ -83,6 +83,10 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                     handleIceCandidate(data.from_player_id, data.candidate);
                     break;
             }
+        },
+        onScribbleMessage: () => {
+             // Dispatching is now handled securely in useWebSocket via CustomEvent
+             // to prevent React state batching race conditions.
         }
     });
 
@@ -153,7 +157,11 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
 
             <div style={{ marginBottom: '20px', textAlign: 'center' }}>
                 <h2>Room: {roomCode}</h2>
-                <p>Player: {username}</p>
+                <div style={{ display: 'flex', justifyContent: 'center', gap: '8px', fontSize: '0.9rem', color: '#aaa', margin: '4px 0' }}>
+                    <span>Player ID: {playerId}</span>
+                    <span>•</span>
+                    <span>Username: {username}</span>
+                </div>
                 <div style={{ display: 'flex', justifyContent: 'center', gap: '10px', marginTop: '10px' }}>
                     <button
                         onClick={() => setAudioEnabled(!audioEnabled)}
@@ -202,6 +210,7 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                         playerId={playerId}
                         gameState={{ player1_id: playerId }}
                         onStateUpdate={() => { }}
+                        sendMessage={sendMessage}
                     />
                 </div>
             ) : (
@@ -236,6 +245,15 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                             style={{ padding: '20px 40px', fontSize: '1.1rem', backgroundColor: '#00BCD4', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}
                         >
                             ♟️ Chess
+                        </button>
+                        <button
+                            onClick={() => {
+                                sendMessage('game_selected', { game_type: 'scribble' });
+                                setAppState({ ...appState, currentGame: 'scribble' });
+                            }}
+                            style={{ padding: '20px 40px', fontSize: '1.1rem', backgroundColor: '#F59E0B', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}
+                        >
+                            ✏️ Scribble Draw
                         </button>
                         <button
                             onClick={() => {

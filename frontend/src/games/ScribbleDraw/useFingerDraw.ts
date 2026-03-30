@@ -14,6 +14,45 @@ export interface StrokeData {
     isEnd: boolean;
 }
 
+class KalmanFilter1D {
+    private q: number; // Process noise
+    private r: number; // Measurement noise
+    private p: number; // Estimation error covariance
+    private x: number; // State estimate
+
+    constructor(q: number, r: number, p: number, initial_x: number) {
+        this.q = q;
+        this.r = r;
+        this.p = p;
+        this.x = initial_x;
+    }
+
+    update(measurement: number): number {
+        if (isNaN(this.x)) {
+            this.x = measurement;
+        }
+        
+        // Prediction update
+        this.p = this.p + this.q;
+
+        // Measurement update
+        const k = this.p / (this.p + this.r);
+        this.x = this.x + k * (measurement - this.x);
+        this.p = (1 - k) * this.p;
+
+        return this.x;
+    }
+
+    reset(initial_x: number) {
+        this.x = initial_x;
+    }
+}
+
+// Configuration for drawing stabilization
+const KALMAN_Q = 0.005; // Less reactive to sudden jumps (process noise)
+const KALMAN_R = 0.05;   // Trust past predictions more (measurement noise)
+const DEAD_ZONE_RADIUS = 2.5; // Pixels distance to ignore micro-movements
+
 export const useFingerDraw = ({
     trackingData,
     canvasWidth,
@@ -38,6 +77,11 @@ export const useFingerDraw = ({
     
     const bufferRef = useRef<Point[]>([]);
     const isDrawingRef = useRef(false);
+    
+    // Tracking stability state
+    const kalmanX = useRef(new KalmanFilter1D(KALMAN_Q, KALMAN_R, 1, NaN));
+    const kalmanY = useRef(new KalmanFilter1D(KALMAN_Q, KALMAN_R, 1, NaN));
+    const lastPoint = useRef<Point | null>(null);
 
     useEffect(() => {
         if (!enabled) return;
@@ -67,7 +111,10 @@ export const useFingerDraw = ({
                 isDrawingRef.current = false;
                 setIsDrawing(false);
                 setCurrentPoint(null);
+                lastPoint.current = null;
             }
+            kalmanX.current.reset(NaN);
+            kalmanY.current.reset(NaN);
             return;
         }
 
@@ -77,8 +124,11 @@ export const useFingerDraw = ({
                 isDrawingRef.current = false;
                 setIsDrawing(false);
                 setCurrentPoint(null);
+                lastPoint.current = null;
                 onEmitStroke({ points: [], color, brushSize, isEnd: true });
             }
+            kalmanX.current.reset(NaN);
+            kalmanY.current.reset(NaN);
             return;
         }
 
@@ -86,7 +136,27 @@ export const useFingerDraw = ({
         const isPinching = pinchDist < 0.05;
 
         const indexTip = landmarks[8];
-        const point = landmarkToCanvas(indexTip, canvasWidth, canvasHeight, mirror);
+        const rawPoint = landmarkToCanvas(indexTip, canvasWidth, canvasHeight, mirror);
+        
+        // Pass through Kalman Filter
+        let kx = kalmanX.current.update(rawPoint.x);
+        let ky = kalmanY.current.update(rawPoint.y);
+
+        // Apply Dead Zone (Stability Filter)
+        if (lastPoint.current) {
+            const dx = kx - lastPoint.current.x;
+            const dy = ky - lastPoint.current.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+
+            // Normalize distance effectively checks threshold scaling logic
+            if (dist < DEAD_ZONE_RADIUS) {
+                kx = lastPoint.current.x;
+                ky = lastPoint.current.y;
+            }
+        }
+
+        const point = { x: Math.round(kx), y: Math.round(ky) }; // Clean, whole pixels
+        lastPoint.current = point;
 
         setCurrentPoint(point);
 

@@ -126,7 +126,32 @@ const isPinching = (landmarks: HandLandmark[]): boolean => {
     const thumbTip = landmarks[4];
     const indexTip = landmarks[8];
     const distance = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
-    return distance < 0.05; // tune between 0.04-0.07
+    return distance < 0.04;
+};
+
+const playAudioEffect = (isCapture: boolean) => {
+    try {
+        const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+        if (!AudioContext) return;
+        const ctx = new AudioContext();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        if (isCapture) {
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(150, ctx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(50, ctx.currentTime + 0.15);
+        } else {
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(400, ctx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(600, ctx.currentTime + 0.1);
+        }
+        gain.gain.setValueAtTime(0.1, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.1);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.15);
+    } catch(e) {}
 };
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -148,9 +173,14 @@ export const Chess: React.FC<ChessProps> = ({ playerId, gameState, onStateUpdate
     const [hovered, setHovered] = useState<Position | null>(null);
     const [pinching, setPinching] = useState(false);
     const [fingerScreen, setFingerScreen] = useState<{ x: number; y: number } | null>(null);
+    const [draggingPiece, setDraggingPiece] = useState<{ pos: Position, piece: Piece } | null>(null);
     const [gestureMode, setGestureMode] = useState(true);
     const [camError, setCamError] = useState(false);
-    const [debugMode, setDebugMode] = useState(false);
+    const [debugMode, setDebugMode] = useState(true); // Default to true as per testing request
+
+    // Cursor smoothing
+    const smoothXRef = useRef<number>(NaN);
+    const smoothYRef = useRef<number>(NaN);
 
     // Refs
     const previewVideoRef = useRef<HTMLVideoElement>(null);
@@ -161,7 +191,10 @@ export const Chess: React.FC<ChessProps> = ({ playerId, gameState, onStateUpdate
     const handsRef = useRef<Hands | null>(null);
     const camRef = useRef<Camera | null>(null);
     const wasPinchingRef = useRef(false);
-    const pinchCoolRef = useRef(false);
+    const hoverFramesRef = useRef(0);
+    const lockedHoverRef = useRef<Position | null>(null);
+    const prevCellRef = useRef<Position | null>(null);
+    const draggingPieceRef = useRef<{ pos: Position, piece: Piece } | null>(null);
     const stateRef = useRef({ board, selected, validMoves, currentTurn, myColor, ep, gameOver });
 
     useEffect(() => { stateRef.current = { board, selected, validMoves, currentTurn, myColor, ep, gameOver }; },
@@ -212,6 +245,9 @@ export const Chess: React.FC<ChessProps> = ({ playerId, gameState, onStateUpdate
         const nb = board.map(r => [...r]);
         const mp = nb[from.row][from.col]!;
 
+        const isCapture = !!nb[to.row][to.col] || (mp.type === 'pawn' && ep?.row === to.row && ep?.col === to.col);
+        playAudioEffect(isCapture);
+
         if (mp.type === 'pawn' && ep?.row === to.row && ep?.col === to.col)
             nb[currentTurn === 'white' ? to.row + 1 : to.row - 1][to.col] = null;
 
@@ -236,43 +272,64 @@ export const Chess: React.FC<ChessProps> = ({ playerId, gameState, onStateUpdate
         wsRef.current?.send(JSON.stringify({ type: 'game_state_update', data: { state: ns } }));
     }, [onStateUpdate]);
 
-    // ── Square Interaction ────────────────────────────────────────────────────
-    const interact = useCallback((row: number, col: number) => {
+    // ── Drag & Drop Interaction ──────────────────────────────────────────────
+    const handleDragStart = useCallback((row: number, col: number) => {
+        const { board, currentTurn, myColor, ep, gameOver } = stateRef.current;
+        if (gameOver || myColor !== currentTurn) return;
+        const piece = board[row][col];
+        if (piece?.color === myColor) {
+            setSelected({ row, col });
+            setValidMoves(getLegalMoves(board, { row, col }, ep));
+            draggingPieceRef.current = { pos: { row, col }, piece };
+            setDraggingPiece(draggingPieceRef.current);
+        }
+    }, []);
+
+    const handleDrop = useCallback((row: number, col: number) => {
+        const { selected, validMoves } = stateRef.current;
+        if (selected) {
+            if (validMoves.some(m => m.row === row && m.col === col)) {
+                doMove(selected, { row, col });
+            }
+        }
+        setSelected(null); setValidMoves([]); 
+        draggingPieceRef.current = null;
+        setDraggingPiece(null);
+    }, [doMove]);
+
+    // Used strictly for fallback clicks
+    const interactFallback = useCallback((row: number, col: number) => {
         const { board, selected, validMoves, currentTurn, myColor, ep, gameOver } = stateRef.current;
         if (gameOver || myColor !== currentTurn) return;
         const piece = board[row][col];
-
         if (selected) {
             if (validMoves.some(m => m.row === row && m.col === col)) {
                 doMove(selected, { row, col }); return;
             }
             if (piece?.color === myColor) {
-                setSelected({ row, col });
-                setValidMoves(getLegalMoves(board, { row, col }, ep)); return;
+                setSelected({ row, col }); setValidMoves(getLegalMoves(board, { row, col }, ep)); return;
             }
             setSelected(null); setValidMoves([]); return;
         }
-        if (piece?.color === myColor) {
-            setSelected({ row, col });
-            setValidMoves(getLegalMoves(board, { row, col }, ep));
-        }
+        if (piece?.color === myColor) { setSelected({ row, col }); setValidMoves(getLegalMoves(board, { row, col }, ep)); }
     }, [doMove]);
 
     // ── Finger → Board Square ─────────────────────────────────────────────────
-    const landmarkToBoardSquare = useCallback((landmark: { x: number, y: number }, videoEl: HTMLVideoElement, boardRect: DOMRect): Position | null => {
-        // Mirror the X coordinate because the user is facing the camera, 
-        // and usually we want the right hand going right to map to the right side
-        const screenX = (1 - landmark.x) * videoEl.videoWidth;
-        const screenY = landmark.y * videoEl.videoHeight;
+    const landmarkToBoardSquare = useCallback((screenX: number, screenY: number, boardRect: DOMRect): Position | null => {
+        if (
+            screenX < boardRect.left ||
+            screenX > boardRect.right ||
+            screenY < boardRect.top ||
+            screenY > boardRect.bottom
+        ) {
+            return null;
+        }
 
         const squareW = boardRect.width / 8;
         const squareH = boardRect.height / 8;
 
         const rawCol = Math.floor((screenX - boardRect.left) / squareW);
         const rawRow = Math.floor((screenY - boardRect.top) / squareH);
-
-        // Return null if completely outside board bounds with some margin
-        if (rawCol < -2 || rawCol > 9 || rawRow < -2 || rawRow > 9) return null;
 
         const col = Math.max(0, Math.min(7, rawCol));
         const row = Math.max(0, Math.min(7, rawRow));
@@ -330,36 +387,105 @@ export const Chess: React.FC<ChessProps> = ({ playerId, gameState, onStateUpdate
 
             // Use first hand for control
             const lm = results.multiHandLandmarks[0];
-            const tip = lm[8]; // index finger tip
+            
+            // 1. Finger Stabilization (Use mid-point of index finger)
+            const tipPoint = {
+                x: (lm[8].x + lm[7].x) / 2,
+                y: (lm[8].y + lm[7].y) / 2
+            };
             const pinch = isPinching(lm);
 
             const videoEl = hiddenVideoRef.current;
             const el = boardRef.current;
 
-            let sq: Position | null = null;
-            let sx = 0; let sy = 0;
-
-            if (videoEl && el) {
+            let finalSq: Position | null = null;
+            let renderX = 0;
+            let renderY = 0;
+            
+            if (el) {
                 const boardRect = el.getBoundingClientRect();
-                sq = landmarkToBoardSquare(tip, videoEl, boardRect);
-                sx = (1 - tip.x) * videoEl.videoWidth;
-                sy = tip.y * videoEl.videoHeight;
-                setFingerScreen({ x: sx, y: sy });
+                
+                // Map the entire camera field-of-view directly into the coordinates of the physical board DOM rectangle
+                const rawX = boardRect.left + ((1 - tipPoint.x) * boardRect.width);
+                const rawY = boardRect.top + (tipPoint.y * boardRect.height);
+                
+                // 2. Adaptive EMA Smoothing & Deadzone
+                if (!Number.isNaN(smoothXRef.current)) {
+                    const dx = rawX - smoothXRef.current;
+                    const dy = rawY - smoothYRef.current;
+                    const speed = Math.sqrt(dx * dx + dy * dy);
+                    
+                    const alpha = speed > 15 ? 0.6 : 0.18; // adaptive lerp curve
+                    if (speed > 2) { // dead zone to freeze jitter completely
+                        smoothXRef.current += dx * alpha;
+                        smoothYRef.current += dy * alpha;
+                    }
+                } else {
+                    smoothXRef.current = rawX;
+                    smoothYRef.current = rawY;
+                }
+
+                // 3. Base logic pos uses smoothed position
+                renderX = smoothXRef.current;
+                renderY = smoothYRef.current;
+
+                const rawSq = landmarkToBoardSquare(renderX, renderY, boardRect);
+
+                // 4. Hover Stability Lock (Fix flicker completely)
+                if (rawSq?.row === prevCellRef.current?.row && rawSq?.col === prevCellRef.current?.col) {
+                    hoverFramesRef.current++;
+                } else {
+                    hoverFramesRef.current = 0;
+                }
+                
+                prevCellRef.current = rawSq;
+
+                if (hoverFramesRef.current > 4) {
+                    lockedHoverRef.current = rawSq;
+                }
+
+                finalSq = lockedHoverRef.current;
+
+                // 5. Magnetic Snapping Visually
+                if (finalSq && hoverFramesRef.current > 4) {
+                    const squareW = boardRect.width / 8;
+                    const squareH = boardRect.height / 8;
+                    const { myColor } = stateRef.current;
+                    
+                    const gridCol = myColor === 'black' ? 7 - finalSq.col : finalSq.col;
+                    const gridRow = myColor === 'black' ? 7 - finalSq.row : finalSq.row;
+                    
+                    const snapX = boardRect.left + gridCol * squareW + squareW / 2;
+                    const snapY = boardRect.top + gridRow * squareH + squareH / 2;
+                    
+                    // Pull the render cursor heavily into the center of the hovered square
+                    renderX = 0.3 * renderX + 0.7 * snapX;
+                    renderY = 0.3 * renderY + 0.7 * snapY;
+                }
+
+                setFingerScreen({ x: renderX, y: renderY });
             }
 
-            setHovered(sq);
+            setHovered(finalSq);
             setPinching(pinch);
 
             drawHand(ctx, lm, canvas.width, canvas.height, pinch);
 
-            // State machine for picking up and moving pieces
+            // Drag-and-Drop Intent Action Engine
             const wasPinching = wasPinchingRef.current;
 
-            if (pinch && !wasPinching && sq) {
-                if (!pinchCoolRef.current) {
-                    interact(sq.row, sq.col);
-                    pinchCoolRef.current = true;
-                    setTimeout(() => pinchCoolRef.current = false, 500);
+            if (pinch && !wasPinching && finalSq) {
+                // Must be a stable hover to prevent noisy accident pickups
+                if (hoverFramesRef.current > 3 || draggingPieceRef.current) {
+                    handleDragStart(finalSq.row, finalSq.col);
+                }
+            }
+            
+            if (!pinch && wasPinching) {
+                if (finalSq && draggingPieceRef.current) {
+                    handleDrop(finalSq.row, finalSq.col);
+                } else {
+                    handleDrop(-1, -1);
                 }
             }
 
@@ -386,7 +512,7 @@ export const Chess: React.FC<ChessProps> = ({ playerId, gameState, onStateUpdate
             hands.close();
             camRef.current?.stop();
         };
-    }, [gestureMode, landmarkToBoardSquare, interact]);
+    }, [gestureMode, landmarkToBoardSquare, handleDragStart, handleDrop]);
 
     // ── Promotion ─────────────────────────────────────────────────────────────
     const handlePromotion = (pt: PieceType) => {
@@ -471,13 +597,27 @@ export const Chess: React.FC<ChessProps> = ({ playerId, gameState, onStateUpdate
                 }}
             />
 
-            {/* ── DARK VIGNETTE so board is readable ── */}
-            {gestureMode && (
+            {/* ── DEBUG HUD (As requested: Print row/col + Piece) ── */}
+            {debugMode && (
                 <div style={{
-                    position: 'absolute', inset: 0,
-                    background: 'radial-gradient(ellipse at center, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.55) 100%)',
-                    zIndex: 3, pointerEvents: 'none',
-                }} />
+                    position: 'absolute', top: 270, right: 20, width: 320,
+                    padding: '16px', background: 'rgba(0,0,0,0.85)',
+                    border: '2px solid rgb(0, 255, 0)', borderRadius: 12,
+                    color: '#0f0', fontFamily: 'monospace', zIndex: 50,
+                    boxShadow: '0 0 15px rgba(0,255,0,0.3)',
+                }}>
+                    <h3 style={{ margin: '0 0 8px 0', fontSize: '14px', textTransform: 'uppercase' }}>Mapping Debug Pipeline</h3>
+                    <div>Finger Tracking: {fingerScreen ? '✅ ACTIVE' : '❌ NOT RECOGNIZED'}</div>
+                    {fingerScreen && <div>Finger (x, y): {Math.round(fingerScreen.x)}, {Math.round(fingerScreen.y)}</div>}
+                    <div style={{ color: hovered ? '#0f0' : '#f00', marginTop: '8px' }}>
+                        Row, Col: {hovered ? `${hovered.row}, ${hovered.col}` : 'Out of Bounds'}
+                    </div>
+                    {hovered && (
+                        <div>
+                            Piece: {board[hovered.row][hovered.col] ? board[hovered.row][hovered.col]?.type : '--'}
+                        </div>
+                    )}
+                </div>
             )}
 
             {/* ── HEADER BAR ── */}
@@ -592,18 +732,20 @@ export const Chess: React.FC<ChessProps> = ({ playerId, gameState, onStateUpdate
                                 const lm = isLM(r, c);
                                 const capture = vm && piece && piece.color !== myColor;
 
-                                // Square color
+                                const isDraggingThis = draggingPiece?.pos.row === r && draggingPiece?.pos.col === c;
+
+                                // Square color (Classic Black & White theme)
                                 let bg = light
-                                    ? 'rgba(232,244,248,0.82)'
-                                    : 'rgba(0,188,212,0.75)';
-                                if (lm) bg = light ? 'rgba(246,246,105,0.85)' : 'rgba(186,202,43,0.85)';
+                                    ? 'rgba(240,217,181,1)' // Light Wood
+                                    : 'rgba(181,136,99,1)'; // Dark Wood
+                                if (lm) bg = light ? 'rgba(245,246,130,0.8)' : 'rgba(205,210,106,0.8)';
                                 if (sel) bg = 'rgba(100,220,100,0.85)';
-                                if (hov && !sel) bg = light ? 'rgba(255,230,100,0.7)' : 'rgba(255,200,50,0.7)';
+                                if (hov && !sel && piece) bg = 'rgba(255,255,255,0.4)'; // Subdued hover over interactive pieces
 
                                 return (
                                     <div
                                         key={`${r}-${c}`}
-                                        onClick={!gestureMode ? () => interact(r, c) : undefined}
+                                        onClick={!gestureMode ? () => interactFallback(r, c) : undefined}
                                         style={{
                                             width: sqSize, height: sqSize,
                                             background: bg,
@@ -611,24 +753,27 @@ export const Chess: React.FC<ChessProps> = ({ playerId, gameState, onStateUpdate
                                             position: 'relative',
                                             cursor: !gestureMode ? 'pointer' : 'default',
                                             transition: 'background 0.1s',
+                                            opacity: isDraggingThis ? 0.3 : 1, // Drag ghost effect
                                         }}
                                     >
-                                        {/* Interaction Hover Glow */}
+                                        {/* Interaction Hover Glow (FORCE GREEN BOX) */}
                                         {hov && gestureMode && (
                                             <div style={{
                                                 position: 'absolute', inset: 0,
-                                                boxShadow: 'inset 0 0 20px rgba(0, 255, 255, 0.7)',
+                                                border: '3px solid rgb(0, 255, 0)',
                                                 pointerEvents: 'none',
+                                                zIndex: 10,
                                             }} />
                                         )}
 
-                                        {/* Valid move dot */}
+                                        {/* Valid move dot (Classic Yellow Dots) */}
                                         {vm && !capture && (
                                             <div style={{
                                                 position: 'absolute',
                                                 width: sqSize * 0.32, height: sqSize * 0.32,
                                                 borderRadius: '50%',
-                                                background: 'rgba(0,0,0,0.28)',
+                                                background: 'rgba(246, 235, 20, 0.8)',
+                                                boxShadow: '0 0 10px rgba(246, 235, 20, 0.5)',
                                                 pointerEvents: 'none',
                                             }} />
                                         )}
@@ -637,17 +782,8 @@ export const Chess: React.FC<ChessProps> = ({ playerId, gameState, onStateUpdate
                                         {capture && (
                                             <div style={{
                                                 position: 'absolute', inset: 0,
-                                                border: `${sqSize * 0.07}px solid rgba(0,0,0,0.3)`,
+                                                border: `${sqSize * 0.07}px solid rgba(246, 235, 20, 0.8)`,
                                                 borderRadius: '50%', pointerEvents: 'none',
-                                            }} />
-                                        )}
-
-                                        {/* Hover glow */}
-                                        {hov && gestureMode && (
-                                            <div style={{
-                                                position: 'absolute', inset: 0,
-                                                boxShadow: 'inset 0 0 20px rgba(255,215,0,0.7)',
-                                                pointerEvents: 'none',
                                             }} />
                                         )}
 
@@ -738,19 +874,40 @@ export const Chess: React.FC<ChessProps> = ({ playerId, gameState, onStateUpdate
                 ))}
             </div>
 
+            {/* ── ACTIVE DRAGGING PIECE LAYER ── */}
+            {draggingPiece && fingerScreen && (
+                <div style={{
+                    position: 'fixed',
+                    left: fingerScreen.x,
+                    top: fingerScreen.y,
+                    transform: 'translate(-50%, -50%)',
+                    pointerEvents: 'none',
+                    zIndex: 25,
+                    fontSize: sqSize * 0.9, // Slightly larger when floating
+                    color: draggingPiece.piece.color === 'white' ? '#fff' : '#111',
+                    textShadow: draggingPiece.piece.color === 'white'
+                        ? '0 6px 16px rgba(0,0,0,1), 0 0 24px rgba(0,0,0,0.8)'
+                        : '0 4px 12px rgba(255,255,255,0.6)',
+                    lineHeight: 1,
+                    userSelect: 'none',
+                }}>
+                    {PIECE_UNICODE[draggingPiece.piece.color][draggingPiece.piece.type]}
+                </div>
+            )}
+
             {/* ── FINGER CURSOR DOT ── */}
             {gestureMode && fingerScreen && (
                 <div style={{
                     position: 'fixed',
                     left: fingerScreen.x - 14, top: fingerScreen.y - 14,
                     width: 28, height: 28, borderRadius: '50%',
-                    background: pinching ? '#FF6B35' : '#FFD700',
+                    background: pinching ? 'rgb(255, 107, 53)' : 'rgb(255, 0, 0)',
                     boxShadow: pinching
                         ? '0 0 0 4px rgba(255,107,53,0.4), 0 0 24px #FF6B35'
-                        : '0 0 0 4px rgba(255,215,0,0.4), 0 0 20px #FFD700',
+                        : '0 0 0 4px rgba(255,0,0,0.4), 0 0 20px #FF0000',
                     pointerEvents: 'none',
-                    zIndex: 20,
-                    transform: pinching ? 'scale(1.6)' : 'scale(1)',
+                    zIndex: 30, // Cursor above piece
+                    transform: pinching ? 'scale(1.3)' : 'scale(1)',
                     transition: 'transform 0.1s, background 0.1s, box-shadow 0.1s',
                 }} />
             )}

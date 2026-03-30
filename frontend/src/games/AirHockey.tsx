@@ -6,8 +6,12 @@ interface AirHockeyProps {
 }
 
 interface Paddle {
-    x: number;
-    y: number;
+    rawX: number;
+    rawY: number;
+    smoothX: number;
+    smoothY: number;
+    vx: number;
+    vy: number;
     radius: number;
 }
 
@@ -32,9 +36,6 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
     const lastSeenHandsRef = useRef<number>(0);
 
     // Local 2-player mode: track BOTH paddles
-    const [paddle1, setPaddle1] = useState<Paddle>({ x: 400, y: 100, radius: 30 });
-    const [paddle2, setPaddle2] = useState<Paddle>({ x: 400, y: 500, radius: 30 });
-
     const [puck, setPuck] = useState<Puck>({
         x: 400,
         y: 300,
@@ -48,21 +49,17 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
 
     const animationRef = useRef<number>();
     const puckRef = useRef<Puck>(puck);
-    const paddle1Ref = useRef<Paddle>(paddle1);
-    const paddle2Ref = useRef<Paddle>(paddle2);
+    const paddle1Ref = useRef<Paddle>({ 
+        rawX: 400, rawY: 100, smoothX: 400, smoothY: 100, vx: 0, vy: 0, radius: 30 
+    });
+    const paddle2Ref = useRef<Paddle>({ 
+        rawX: 400, rawY: 500, smoothX: 400, smoothY: 500, vx: 0, vy: 0, radius: 30 
+    });
 
     // Update refs when state changes
     useEffect(() => {
         puckRef.current = puck;
     }, [puck]);
-
-    useEffect(() => {
-        paddle1Ref.current = paddle1;
-    }, [paddle1]);
-
-    useEffect(() => {
-        paddle2Ref.current = paddle2;
-    }, [paddle2]);
 
     // Update BOTH paddles from hand tracking with hand-locking system
     useEffect(() => {
@@ -102,18 +99,27 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
                 setHandAssignments(prev => ({ ...prev, blue: prev.red === 0 ? 1 : 0 }));
             }
 
+            // Helper to update paddle directly in ref (removes lag from useState)
+            const updatePaddleRef = (paddleRef: React.MutableRefObject<Paddle>, palmCenter: any) => {
+                const rawPointX = (1 - palmCenter.x) * canvas.width;
+                const rawPointY = palmCenter.y * canvas.height;
+                
+                const clampedX = Math.max(30, Math.min(rawPointX, canvas.width - 30));
+                const clampedY = Math.max(30, Math.min(rawPointY, canvas.height - 30));
+
+                const dt = 1; // Assuming constant tracking rate for simple vx/vy 
+                paddleRef.current.vx = (clampedX - paddleRef.current.rawX) / dt;
+                paddleRef.current.vy = (clampedY - paddleRef.current.rawY) / dt;
+                
+                paddleRef.current.rawX = clampedX;
+                paddleRef.current.rawY = clampedY;
+            };
+
             // Update red paddle position (if assigned)
             if (handAssignments.red !== null && trackingData.landmarks[handAssignments.red]) {
                 const palmCenter = trackingData.landmarks[handAssignments.red][9];
                 if (palmCenter) {
-                    const newX = (1 - palmCenter.x) * canvas.width;
-                    const newY = palmCenter.y * canvas.height;
-
-                    setPaddle1({
-                        x: Math.max(30, Math.min(newX, canvas.width - 30)), // Keep within canvas bounds
-                        y: Math.max(30, Math.min(newY, canvas.height - 30)), // Allow full movement
-                        radius: 30,
-                    });
+                    updatePaddleRef(paddle1Ref, palmCenter);
                 }
             }
 
@@ -121,14 +127,7 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
             if (handAssignments.blue !== null && trackingData.landmarks[handAssignments.blue]) {
                 const palmCenter = trackingData.landmarks[handAssignments.blue][9];
                 if (palmCenter) {
-                    const newX = (1 - palmCenter.x) * canvas.width;
-                    const newY = palmCenter.y * canvas.height;
-
-                    setPaddle2({
-                        x: Math.max(30, Math.min(newX, canvas.width - 30)), // Keep within canvas bounds
-                        y: Math.max(30, Math.min(newY, canvas.height - 30)), // Allow full movement
-                        radius: 30,
-                    });
+                    updatePaddleRef(paddle2Ref, palmCenter);
                 }
             }
         } else if (trackingData.landmarks.length === 0) {
@@ -171,15 +170,27 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
             ctx.fillStyle = 'rgba(0, 0, 255, 0.2)';
             ctx.fillRect(canvas.width / 2 - 100, canvas.height - 20, 200, 20);
 
-            // Draw paddles
+            // Apply Adaptive Smoothing to Paddles
+            const applyAdaptiveSmoothing = (paddle: Paddle) => {
+                const speed = Math.sqrt(paddle.vx ** 2 + paddle.vy ** 2);
+                const alpha = speed > 20 ? 0.8 : 0.2; // fast catch up for fast moves, stable for small moves
+                
+                paddle.smoothX = alpha * paddle.rawX + (1 - alpha) * paddle.smoothX;
+                paddle.smoothY = alpha * paddle.rawY + (1 - alpha) * paddle.smoothY;
+            };
+            
+            applyAdaptiveSmoothing(paddle1Ref.current);
+            applyAdaptiveSmoothing(paddle2Ref.current);
+
+            // Draw paddles using smoothed physical positions
             ctx.fillStyle = '#ff0000';
             ctx.beginPath();
-            ctx.arc(paddle1Ref.current.x, paddle1Ref.current.y, paddle1Ref.current.radius, 0, Math.PI * 2);
+            ctx.arc(paddle1Ref.current.smoothX, paddle1Ref.current.smoothY, paddle1Ref.current.radius, 0, Math.PI * 2);
             ctx.fill();
 
             ctx.fillStyle = '#0000ff';
             ctx.beginPath();
-            ctx.arc(paddle2Ref.current.x, paddle2Ref.current.y, paddle2Ref.current.radius, 0, Math.PI * 2);
+            ctx.arc(paddle2Ref.current.smoothX, paddle2Ref.current.smoothY, paddle2Ref.current.radius, 0, Math.PI * 2);
             ctx.fill();
 
             // Update puck physics (use ref to avoid setState in loop)
@@ -210,23 +221,32 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
                 newPuck = { x: 400, y: 300, vx: 3, vy: -2, radius: 15 };
             }
 
-            // Paddle collisions
+            // Paddle collisions (Using Prediction + Radius Buffer logic)
             const checkPaddleCollision = (paddle: Paddle) => {
-                const dx = newPuck.x - paddle.x;
-                const dy = newPuck.y - paddle.y;
+                // Feature 3 & 4: Slight Prediction + Buffer hides ghost collision
+                const predX = paddle.rawX + paddle.vx * 0.5;
+                const predY = paddle.rawY + paddle.vy * 0.5;
+                const collisionRadius = paddle.radius + 5; // Extra buffer
+
+                const dx = newPuck.x - predX;
+                const dy = newPuck.y - predY;
                 const distance = Math.sqrt(dx * dx + dy * dy);
 
-                if (distance < newPuck.radius + paddle.radius) {
-                    // Bounce off paddle
+                if (distance < newPuck.radius + collisionRadius) {
+                    // Bounce off predicted path
                     const angle = Math.atan2(dy, dx);
-                    const speed = Math.sqrt(newPuck.vx * newPuck.vx + newPuck.vy * newPuck.vy);
-                    const newSpeed = Math.min(speed * 1.1, 8); // Speed up slightly, cap at 8
+                    
+                    const puckSpeed = Math.sqrt(newPuck.vx ** 2 + newPuck.vy ** 2);
+                    const paddleSpeed = Math.sqrt(paddle.vx ** 2 + paddle.vy ** 2);
+                    
+                    // Add paddle velocity to the hit (creates hard spikes / slams!)
+                    const newSpeed = Math.min((puckSpeed + (paddleSpeed * 0.15)) * 1.1, 15);
 
                     newPuck.vx = Math.cos(angle) * newSpeed;
                     newPuck.vy = Math.sin(angle) * newSpeed;
 
-                    // Move puck outside paddle to prevent sticking
-                    const overlap = newPuck.radius + paddle.radius - distance;
+                    // Move puck outside predicted bounce zone
+                    const overlap = newPuck.radius + collisionRadius - distance;
                     newPuck.x += Math.cos(angle) * overlap;
                     newPuck.y += Math.sin(angle) * overlap;
                 }

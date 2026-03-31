@@ -395,7 +395,6 @@ export const Chess: React.FC<ChessProps> = ({ playerId, gameState, onStateUpdate
             };
             const pinch = isPinching(lm);
 
-            const videoEl = hiddenVideoRef.current;
             const el = boardRef.current;
 
             let finalSq: Position | null = null;

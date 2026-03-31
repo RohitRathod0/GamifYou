@@ -27,7 +27,13 @@ import { WS_BASE_URL } from '@/utils/constants';
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const BOARD_COLS = 8;
-const PINCH_COOL = 800;   // ms cooldown after pinch
+const DRAG_START_RATIO = 0.35;
+const CURSOR_HISTORY_SIZE = 4;
+const CURSOR_DEADZONE_PX = 3;
+const CURSOR_SLOW_ALPHA = 0.2;
+const CURSOR_FAST_ALPHA = 0.4;
+const CURSOR_FAST_THRESHOLD_PX = 28;
+const SNAP_HYSTERESIS_PX = 24;
 
 // Board colors (semi-transparent for AR)
 const LIGHT_SQ = 'rgba(232, 244, 252, 0.72)';
@@ -49,6 +55,12 @@ interface DragState {
     from: Position;
     screenX: number;
     screenY: number;
+    previewSquare: Position | null;
+}
+
+interface ScreenPoint {
+    x: number;
+    y: number;
 }
 
 export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, onStateUpdate }) => {
@@ -76,6 +88,11 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
     // Gesture refs
     const gestureRef = useRef<GestureState | null>(null);
     const pinchCoolRef = useRef(false);
+    const prevPinchingRef = useRef(false);
+    const pinchStartSquareRef = useRef<Position | null>(null);
+    const pinchStartPointRef = useRef<ScreenPoint | null>(null);
+    const cursorRef = useRef<ScreenPoint | null>(null);
+    const cursorHistoryRef = useRef<ScreenPoint[]>([]);
 
     // Board layout (computed each frame from canvas size)
     const boardLayoutRef = useRef({ x: 0, y: 0, sqSize: 0, totalSize: 0 });
@@ -147,6 +164,76 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
         return { row, col };
     }, []);
 
+    const squareToScreenCenter = useCallback((pos: Position): ScreenPoint => {
+        const { x, y, sqSize } = boardLayoutRef.current;
+        const displayRow = myColorRef.current === 'black' ? 7 - pos.row : pos.row;
+        const displayCol = myColorRef.current === 'black' ? 7 - pos.col : pos.col;
+        return {
+            x: x + displayCol * sqSize + sqSize / 2,
+            y: y + displayRow * sqSize + sqSize / 2,
+        };
+    }, []);
+
+    const smoothCursor = useCallback((raw: ScreenPoint): ScreenPoint => {
+        const history = cursorHistoryRef.current;
+        history.push(raw);
+        if (history.length > CURSOR_HISTORY_SIZE) history.shift();
+
+        const weighted = history.reduce<{ x: number; y: number; weight: number }>(
+            (acc, point, index) => {
+                const weight = index + 1;
+                acc.x += point.x * weight;
+                acc.y += point.y * weight;
+                acc.weight += weight;
+                return acc;
+            },
+            { x: 0, y: 0, weight: 0 }
+        );
+
+        const averaged = {
+            x: weighted.x / weighted.weight,
+            y: weighted.y / weighted.weight,
+        };
+
+        const prev = cursorRef.current;
+        if (!prev) return averaged;
+
+        const delta = Math.hypot(averaged.x - prev.x, averaged.y - prev.y);
+        if (delta < CURSOR_DEADZONE_PX) return prev;
+
+        const alpha = delta > CURSOR_FAST_THRESHOLD_PX ? CURSOR_FAST_ALPHA : CURSOR_SLOW_ALPHA;
+        return {
+            x: prev.x + (averaged.x - prev.x) * alpha,
+            y: prev.y + (averaged.y - prev.y) * alpha,
+        };
+    }, []);
+
+    const getSnappedLegalTarget = useCallback((cursor: ScreenPoint, from: Position, legalMoves: Position[]): Position => {
+        const candidates = [from, ...legalMoves];
+        let best = from;
+        let bestDistance = Number.POSITIVE_INFINITY;
+
+        for (const candidate of candidates) {
+            const center = squareToScreenCenter(candidate);
+            const distance = Math.hypot(cursor.x - center.x, cursor.y - center.y);
+            if (distance < bestDistance) {
+                best = candidate;
+                bestDistance = distance;
+            }
+        }
+
+        const previous = dragRef.current?.previewSquare;
+        if (previous) {
+            const previousCenter = squareToScreenCenter(previous);
+            const previousDistance = Math.hypot(cursor.x - previousCenter.x, cursor.y - previousCenter.y);
+            if (previousDistance <= bestDistance + SNAP_HYSTERESIS_PX) {
+                return previous;
+            }
+        }
+
+        return best;
+    }, [squareToScreenCenter]);
+
 
 
     // ── Execute move ──────────────────────────────────────────────────────────
@@ -199,70 +286,89 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
     }, [onStateUpdate]);
 
     // ── Interact with square (select / move) ──────────────────────────────────
-    const interactSquare = useCallback((row: number, col: number) => {
-        if (gameOverRef.current) return;
-        if (myColorRef.current !== currentTurnRef.current) return;
+    const lockPiece = useCallback((row: number, col: number): boolean => {
+        if (gameOverRef.current) return false;
+        if (myColorRef.current !== currentTurnRef.current) return false;
 
-        const board = boardRef.current;
-        const piece = board[row][col];
-        const sel = selectedRef.current;
-        const vm = validMovesRef.current;
+        const piece = boardRef.current[row][col];
+        if (!piece || piece.color !== myColorRef.current) return false;
 
-        if (sel) {
-            if (vm.some(m => m.row === row && m.col === col)) {
-                doMove(sel, { row, col });
-                return;
-            }
-            if (piece?.color === myColorRef.current) {
-                selectedRef.current = { row, col };
-                validMovesRef.current = getLegalMoves(board, { row, col }, epRef.current);
-                return;
-            }
-            selectedRef.current = null;
-            validMovesRef.current = [];
-            return;
-        }
-        if (piece?.color === myColorRef.current) {
-            selectedRef.current = { row, col };
-            validMovesRef.current = getLegalMoves(board, { row, col }, epRef.current);
-        }
-    }, [doMove]);
+        selectedRef.current = { row, col };
+        validMovesRef.current = getLegalMoves(boardRef.current, { row, col }, epRef.current);
+        dragRef.current = null;
+        return true;
+    }, []);
 
     // ── Process gesture each frame ────────────────────────────────────────────
     const processGesture = useCallback((gs: GestureState, canvasW: number, canvasH: number) => {
         const { indexTip, isPinching } = gs;
-        const { x: sx, y: sy } = landmarkToCanvas(indexTip, canvasW, canvasH);
+        const rawCursor = landmarkToCanvas(indexTip, canvasW, canvasH);
+        const smoothedCursor = smoothCursor(rawCursor);
+        cursorRef.current = smoothedCursor;
+        const { x: sx, y: sy } = smoothedCursor;
         const sq = screenToSquare(sx, sy);
+        const wasPinching = prevPinchingRef.current;
+        const pinchStarted = isPinching && !wasPinching;
+        const pinchEnded = !isPinching && wasPinching;
+        const selected = selectedRef.current;
 
-        // Drag: if we have a selected piece and are pinching, drag it
-        if (isPinching && selectedRef.current && !dragRef.current) {
+        if (pinchStarted) {
+            pinchStartSquareRef.current = sq;
+            pinchStartPointRef.current = { x: sx, y: sy };
+
+            if (sq && selected && validMovesRef.current.some(m => m.row === sq.row && m.col === sq.col)) {
+                doMove(selected, sq);
+            } else if (sq) {
+                lockPiece(sq.row, sq.col);
+            }
+        }
+
+        if (isPinching && selectedRef.current) {
             const piece = boardRef.current[selectedRef.current.row][selectedRef.current.col];
-            if (piece?.color === myColorRef.current) {
-                dragRef.current = { piece, from: selectedRef.current, screenX: sx, screenY: sy };
-            }
-        }
-        if (dragRef.current && isPinching) {
-            dragRef.current.screenX = sx;
-            dragRef.current.screenY = sy;
-        }
-        if (dragRef.current && !isPinching) {
-            // Drop
-            if (sq && validMovesRef.current.some(m => m.row === sq.row && m.col === sq.col)) {
-                doMove(dragRef.current.from, sq);
-            } else {
-                dragRef.current = null;
+            const pinchStartPoint = pinchStartPointRef.current;
+            const movedEnough = pinchStartPoint
+                ? Math.hypot(sx - pinchStartPoint.x, sy - pinchStartPoint.y) >= boardLayoutRef.current.sqSize * DRAG_START_RATIO
+                : false;
+            const movedToDifferentSquare = !!sq && (sq.row !== selectedRef.current.row || sq.col !== selectedRef.current.col);
+
+            if (!dragRef.current && piece?.color === myColorRef.current && (movedEnough || movedToDifferentSquare)) {
+                const previewSquare = getSnappedLegalTarget({ x: sx, y: sy }, selectedRef.current, validMovesRef.current);
+                const previewCenter = squareToScreenCenter(previewSquare);
+                dragRef.current = {
+                    piece,
+                    from: selectedRef.current,
+                    screenX: previewCenter.x,
+                    screenY: previewCenter.y,
+                    previewSquare,
+                };
             }
         }
 
-        // Pinch to select (no drag yet)
-        if (isPinching && !pinchCoolRef.current && !dragRef.current && sq) {
-            pinchCoolRef.current = true;
-            interactSquare(sq.row, sq.col);
-            setTimeout(() => { pinchCoolRef.current = false; }, PINCH_COOL);
+        if (dragRef.current && isPinching) {
+            const previewSquare = getSnappedLegalTarget({ x: sx, y: sy }, dragRef.current.from, validMovesRef.current);
+            const previewCenter = squareToScreenCenter(previewSquare);
+            dragRef.current.previewSquare = previewSquare;
+            dragRef.current.screenX = previewCenter.x;
+            dragRef.current.screenY = previewCenter.y;
+        }
+
+        if (pinchEnded) {
+            if (
+                dragRef.current &&
+                dragRef.current.previewSquare &&
+                validMovesRef.current.some(
+                    m => m.row === dragRef.current!.previewSquare!.row && m.col === dragRef.current!.previewSquare!.col
+                )
+            ) {
+                doMove(dragRef.current.from, dragRef.current.previewSquare);
+            }
+            dragRef.current = null;
+            pinchStartSquareRef.current = null;
+            pinchStartPointRef.current = null;
         }
 
         // Open palm = undo
-        if (gs.gesture === 'open_palm' && !pinchCoolRef.current) {
+        if (!isPinching && gs.gesture === 'open_palm' && !pinchCoolRef.current) {
             pinchCoolRef.current = true;
             // Undo: restore previous board (simple: just deselect for now)
             selectedRef.current = null; validMovesRef.current = [];
@@ -270,7 +376,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
         }
 
         // Peace sign = reset
-        if (gs.gesture === 'peace' && !pinchCoolRef.current) {
+        if (!isPinching && gs.gesture === 'peace' && !pinchCoolRef.current) {
             pinchCoolRef.current = true;
             boardRef.current = createInitialBoard();
             selectedRef.current = null;
@@ -285,7 +391,9 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
             setGameOverState(null);
             setTimeout(() => { pinchCoolRef.current = false; }, 1500);
         }
-    }, [screenToSquare, interactSquare, doMove]);
+
+        prevPinchingRef.current = isPinching;
+    }, [screenToSquare, doMove, lockPiece, smoothCursor, getSnappedLegalTarget, squareToScreenCenter]);
 
     // ── Canvas draw ───────────────────────────────────────────────────────────
     const drawFrame = useCallback(() => {
@@ -318,6 +426,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
             const { x, y, sqSize, total } = computeBoardLayout(W, H);
             return { x, y: y + floatY, sqSize, totalSize: total };
         })();
+        boardLayoutRef.current = { x: bx, y: by, sqSize, totalSize };
 
         // ── Layer 3: Floating board ───────────────────────────────────────────
         ctx.save();
@@ -336,6 +445,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
         const lm = lastMoveRef.current;
         const drag = dragRef.current;
         const myCol = myColorRef.current;
+        const selectedPiece = sel ? board[sel.row][sel.col] : null;
 
         for (let dr = 0; dr < 8; dr++) {
             for (let dc = 0; dc < 8; dc++) {
@@ -354,9 +464,9 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
                 // Hover from gesture — compute once per square
                 const gsCur = gestureRef.current;
                 let isHoveredSq = false;
-                if (gsCur) {
-                    const { x: fx, y: fy } = landmarkToCanvas(gsCur.indexTip, W, H);
-                    const hSq = screenToSquare(fx, fy);
+                const cursorPoint = cursorRef.current;
+                if (gsCur && cursorPoint) {
+                    const hSq = screenToSquare(cursorPoint.x, cursorPoint.y);
                     if (hSq?.row === row && hSq?.col === col) {
                         isHoveredSq = true;
                         if (!drag) fillColor = HOVER_SQ;
@@ -469,8 +579,9 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
 
         // ── VISUAL FEEDBACK: Hovered piece tooltip + info panel ───────────────
         const gsFeedback = gestureRef.current;
-        if (gsFeedback && !drag) {
-            const { x: curX, y: curY } = landmarkToCanvas(gsFeedback.indexTip, W, H);
+        const cursorPoint = cursorRef.current;
+        if (gsFeedback && cursorPoint && !drag) {
+            const { x: curX, y: curY } = cursorPoint;
             const hovSq = screenToSquare(curX, curY);
 
             if (hovSq) {
@@ -551,6 +662,44 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
             }
         }
 
+        if (selectedPiece && sel) {
+            const files = 'abcdefgh';
+            const selectedNotation = `${files[sel.col]}${8 - sel.row}`;
+            const moveList = vm
+                .slice(0, 6)
+                .map(m => `${files[m.col]}${8 - m.row}`)
+                .join(', ');
+
+            ctx.save();
+            ctx.fillStyle = 'rgba(0,0,0,0.84)';
+            ctx.beginPath(); ctx.roundRect(16, 164, 260, 92, 12); ctx.fill();
+            ctx.strokeStyle = '#00FF88';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            ctx.fillStyle = '#00FF88';
+            ctx.font = 'bold 12px "Segoe UI", sans-serif';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+            ctx.fillText('LOCKED PIECE', 28, 176);
+
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = 'bold 16px "Segoe UI", sans-serif';
+            ctx.fillText(
+                `${selectedPiece.color.charAt(0).toUpperCase() + selectedPiece.color.slice(1)} ${selectedPiece.type} at ${selectedNotation}`,
+                28,
+                198
+            );
+
+            ctx.fillStyle = '#00E5FF';
+            ctx.font = '12px "Segoe UI", sans-serif';
+            ctx.fillText(`Moves: ${moveList || 'none'}`, 28, 224);
+
+            ctx.fillStyle = 'rgba(255,255,255,0.72)';
+            ctx.fillText('Hold pinch and move your hand, then release to drop.', 28, 240);
+            ctx.restore();
+        }
+
         // ── Layer 5: Status overlay (top center) ──────────────────────────────
         const inChk = isInCheck(board, currentTurnRef.current);
         const statusText = gameOverRef.current
@@ -588,7 +737,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
         });
 
         // ── Gesture hint (bottom right) ───────────────────────────────────────
-        const hints = ['🤌 Pinch = select/drop', '✌️ Peace = reset'];
+        const hints = ['🤌 Pinch piece = lock', 'Move while pinching, release = drop', '✌️ Peace = reset'];
         ctx.save();
         ctx.font = '12px "Segoe UI"'; ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(255,255,255,0.5)';
         hints.forEach((h, i) => ctx.fillText(h, W - 16, H - 70 + i * 18));
@@ -619,8 +768,8 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
 
         // ── Layer 6: Cursor (always on top) ──────────────────────────────────
         const gsCursor = gestureRef.current;
-        if (gsCursor) {
-            const { x: cx, y: cy } = landmarkToCanvas(gsCursor.indexTip, W, H);
+        if (gsCursor && cursorRef.current) {
+            const { x: cx, y: cy } = cursorRef.current;
             const isPinch = gsCursor.isPinching;
 
             ctx.save();
@@ -666,8 +815,8 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
             ctx.textAlign = 'left'; ctx.textBaseline = 'top';
             const gsDbg = gestureRef.current;
             ctx.fillText(`Pinching: ${gsDbg ? gsDbg.isPinching : false}`, 20, 20);
-            if (gsDbg) {
-                const { x: fx, y: fy } = landmarkToCanvas(gsDbg.indexTip, W, H);
+            if (gsDbg && cursorRef.current) {
+                const { x: fx, y: fy } = cursorRef.current;
                 const hSq = screenToSquare(fx, fy);
                 ctx.fillText(`Raw Canvas X: ${Math.round(fx)} Y: ${Math.round(fy)}`, 20, 45);
                 ctx.fillText(`Map Row: ${hSq?.row ?? 'N/A'} Col: ${hSq?.col ?? 'N/A'}`, 20, 70);
@@ -695,6 +844,8 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
 
             if (!results.multiHandLandmarks?.length) {
                 gestureRef.current = null;
+                cursorRef.current = null;
+                cursorHistoryRef.current = [];
                 return;
             }
 
@@ -704,11 +855,42 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
                 drawHandSkeleton(ctx, lm as HandLandmark[], W, H, gs.isPinching);
             });
 
-            // Use first hand for game control
-            const lm = results.multiHandLandmarks[0] as HandLandmark[];
-            const gs = classifyGesture(lm);
-            gestureRef.current = gs;
-            processGesture(gs, W, H);
+            const boardCenterX = boardLayoutRef.current.totalSize > 0
+                ? boardLayoutRef.current.x + boardLayoutRef.current.totalSize / 2
+                : W / 2;
+            const boardCenterY = boardLayoutRef.current.totalSize > 0
+                ? boardLayoutRef.current.y + boardLayoutRef.current.totalSize / 2
+                : H / 2;
+
+            const candidates = results.multiHandLandmarks.map((lm) => {
+                const landmarks = lm as HandLandmark[];
+                const gs = classifyGesture(landmarks);
+                const cursor = landmarkToCanvas(gs.indexTip, W, H);
+                const hoveredSquare = screenToSquare(cursor.x, cursor.y);
+                const distanceToBoardCenter = Math.hypot(cursor.x - boardCenterX, cursor.y - boardCenterY);
+
+                let score = 0;
+                if (gs.isPinching) score += 120;
+                if (gs.gesture === 'point') score += 70;
+                if (gs.gesture === 'pinch') score += 50;
+                if (hoveredSquare) score += 35;
+                score -= distanceToBoardCenter / 25;
+
+                return { gs, score };
+            });
+
+            const bestCandidate = candidates.reduce((best, candidate) =>
+                !best || candidate.score > best.score ? candidate : best,
+                null as { gs: GestureState; score: number } | null
+            );
+
+            if (!bestCandidate) {
+                gestureRef.current = null;
+                return;
+            }
+
+            gestureRef.current = bestCandidate.gs;
+            processGesture(bestCandidate.gs, W, H);
         });
 
         handsRef.current = hands;

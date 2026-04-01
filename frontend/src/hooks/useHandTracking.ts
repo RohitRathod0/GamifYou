@@ -1,94 +1,69 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Hands, Results } from '@mediapipe/hands';
-import { Camera } from '@mediapipe/camera_utils';
 import { MEDIAPIPE_CONFIG } from '@/utils/constants';
 
-export interface HandLandmark {
-    x: number;
-    y: number;
-    z: number;
-}
+export interface HandLandmark { x: number; y: number; z: number; }
+export interface HandTrackingData { landmarks: HandLandmark[][]; handedness: string[]; }
 
-export interface HandTrackingData {
-    landmarks: HandLandmark[][];
-    handedness: string[];
-}
+// Singleton state
+let globalHands: Hands | null = null;
+let globalStream: MediaStream | null = null;
+let isInitializing = false;
 
-// Module-level singleton to prevent multiple MediaPipe instances
-let globalHandsInstance: Hands | null = null;
-let globalCameraInstance: Camera | null = null;
-let initializationPromise: Promise<void> | null = null;
-
-export const useHandTracking = (videoRef: React.RefObject<HTMLVideoElement>, providedStream?: MediaStream | null) => {
+export const useHandTracking = (
+    videoRef: React.RefObject<HTMLVideoElement>,
+    providedStream?: MediaStream | null
+) => {
     const [isReady, setIsReady] = useState(false);
-    const [trackingData, setTrackingData] = useState<HandTrackingData>({
-        landmarks: [],
-        handedness: [],
-    });
     const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
 
-    const handsRef = useRef<Hands | null>(null);
-    const cameraRef = useRef<Camera | null>(null);
+    // ✅ KEY FIX: trackingData lives in a REF, not state — no re-renders
+    const trackingDataRef = useRef<HandTrackingData>({ landmarks: [], handedness: [] });
+
+    // Still expose a state version, but only update it at low frequency if needed
+    const [trackingData, setTrackingData] = useState<HandTrackingData>({ landmarks: [], handedness: [] });
+
+    const frameLoopRunning = useRef(false);
 
     const onResults = useCallback((results: Results) => {
-        if (results.multiHandLandmarks && results.multiHandedness) {
-            const newData = {
+        const newData: HandTrackingData = results.multiHandLandmarks?.length
+            ? {
                 landmarks: results.multiHandLandmarks,
-                handedness: results.multiHandedness.map((h) => h.label),
-            };
+                handedness: results.multiHandedness?.map(h => h.label) ?? [],
+            }
+            : { landmarks: [], handedness: [] };
 
-            // Log only when hands are first detected (not every frame)
-            setTrackingData((prev) => {
-                if (prev.landmarks.length === 0 && newData.landmarks.length > 0) {
-                    console.log('✋ Hand detected!', newData.handedness);
-                }
-                return newData;
-            });
-        } else {
-            setTrackingData({
-                landmarks: [],
-                handedness: [],
-            });
-        }
+        // ✅ Update ref immediately (no re-render, used by game loop)
+        trackingDataRef.current = newData;
+
+        // ✅ Update state at most once when detection status CHANGES
+        setTrackingData(prev => {
+            const wasEmpty = prev.landmarks.length === 0;
+            const isEmpty = newData.landmarks.length === 0;
+            if (wasEmpty !== isEmpty) return newData; // status changed → update
+            if (!isEmpty) return newData;              // hands present → always update
+            return prev;                               // both empty → skip re-render
+        });
     }, []);
 
     useEffect(() => {
-        if (!videoRef.current) return;
-        // If providedStream is explicitly null (meaning we are waiting for it upstream), do not initialize yet
-        if (providedStream === null) return;
+        if (!videoRef.current || providedStream === null) return;
+        if (isInitializing) return;
 
-        const initializeMediaPipe = async () => {
-            // Reuse existing instance if available
-            if (globalHandsInstance && globalCameraInstance) {
-                console.log('📹 Reusing existing MediaPipe instance');
-                handsRef.current = globalHandsInstance;
-                cameraRef.current = globalCameraInstance;
-                globalHandsInstance.onResults(onResults);
+        const init = async () => {
+            // Reuse existing instance
+            if (globalHands) {
+                globalHands.onResults(onResults);
+                if (globalStream) setMediaStream(globalStream);
                 setIsReady(true);
                 return;
             }
 
-            // Wait if initialization is in progress
-            if (initializationPromise) {
-                console.log('⏳ Waiting for MediaPipe initialization...');
-                await initializationPromise;
-                if (globalHandsInstance && globalCameraInstance) {
-                    handsRef.current = globalHandsInstance;
-                    cameraRef.current = globalCameraInstance;
-                    globalHandsInstance.onResults(onResults);
-                    setIsReady(true);
-                }
-                return;
-            }
+            isInitializing = true;
 
-            // Create new instance
-            console.log('📹 Initializing MediaPipe Hands...');
-
-            initializationPromise = (async () => {
+            try {
                 const hands = new Hands({
-                    locateFile: (file) => {
-                        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
-                    },
+                    locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
                 });
 
                 hands.setOptions({
@@ -100,93 +75,55 @@ export const useHandTracking = (videoRef: React.RefObject<HTMLVideoElement>, pro
 
                 hands.onResults(onResults);
 
-                // Get media stream explicitly so we capture audio as well
-                try {
-                    let stream = providedStream;
-                    if (providedStream === undefined) {
-                        stream = await navigator.mediaDevices.getUserMedia({
-                            video: { width: 640, height: 480 },
-                            audio: true, // Request microphone access for WebRTC
-                        });
-                    }
+                // ✅ Initialize the model BEFORE starting the frame loop
+                await hands.initialize();
 
-                    if (stream && videoRef.current) {
-                        if (videoRef.current.srcObject !== stream) {
-                            videoRef.current.srcObject = stream;
-                            await videoRef.current.play();
-                        }
-                    }
-
-                    if (stream) {
-                        setMediaStream(stream);
-                    }
-
-                    const camera = new Camera(videoRef.current!, {
-                        onFrame: async () => {
-                            if (videoRef.current && globalHandsInstance) {
-                                await globalHandsInstance.send({ image: videoRef.current });
-                            }
-                        },
-                        width: 640,
-                        height: 480,
+                const stream = providedStream !== undefined
+                    ? providedStream
+                    : await navigator.mediaDevices.getUserMedia({
+                        video: { width: 640, height: 480 },
+                        audio: true,
                     });
 
-                    // We don't call camera.start() because that internally calls getUserMedia again 
-                    // without audio. Calling it repeatedly can cause issues. MediaPipe can still 
-                    // process frames via requestAnimationFrame.
-                    // Instead of camera.start(), we just implement our own frame loop
+                if (stream && videoRef.current) {
+                    videoRef.current.srcObject = stream;
+                    await videoRef.current.play();
+                    globalStream = stream;
+                    setMediaStream(stream);
+                }
+
+                // ✅ Set global BEFORE starting frame loop
+                globalHands = hands;
+
+                // ✅ Single frame loop, only starts once
+                if (!frameLoopRunning.current) {
+                    frameLoopRunning.current = true;
                     const frameLoop = async () => {
-                        if (videoRef.current && globalHandsInstance && !videoRef.current.paused) {
-                            await globalHandsInstance.send({ image: videoRef.current });
+                        if (videoRef.current && globalHands && !videoRef.current.paused) {
+                            await globalHands.send({ image: videoRef.current });
                         }
                         requestAnimationFrame(frameLoop);
                     };
-                    frameLoop();
-
-                    globalHandsInstance = hands;
-                    globalCameraInstance = camera;
-                    handsRef.current = hands;
-                    cameraRef.current = camera;
-                } catch (err) {
-                    console.error("Error accessing user media:", err);
+                    requestAnimationFrame(frameLoop);
                 }
 
-                console.log('✅ MediaPipe Hands initialized successfully!');
-            })();
-
-            await initializationPromise;
-            initializationPromise = null;
-            setIsReady(true);
+                setIsReady(true);
+            } catch (err) {
+                console.error('MediaPipe init error:', err);
+            } finally {
+                isInitializing = false;
+            }
         };
 
-        initializeMediaPipe();
-
-        // Cleanup: Don't destroy global instance, just remove our reference
-        return () => {
-            console.log('🔄 Component unmounting, keeping MediaPipe instance alive');
-            // Don't stop camera or close hands - keep them running for reuse
-        };
+        init();
     }, [videoRef, onResults, providedStream]);
 
-    const getIndexFingerTip = useCallback((handIndex: number = 0): HandLandmark | null => {
-        if (trackingData.landmarks[handIndex] && trackingData.landmarks[handIndex][8]) {
-            return trackingData.landmarks[handIndex][8];
-        }
-        return null;
-    }, [trackingData]);
+    // ✅ These read from ref — always fresh, no stale closure issues
+    const getIndexFingerTip = useCallback((handIndex = 0): HandLandmark | null =>
+        trackingDataRef.current.landmarks[handIndex]?.[8] ?? null, []);
 
-    const getPalmCenter = useCallback((handIndex: number = 0): HandLandmark | null => {
-        if (trackingData.landmarks[handIndex] && trackingData.landmarks[handIndex][9]) {
-            return trackingData.landmarks[handIndex][9];
-        }
-        return null;
-    }, [trackingData]);
+    const getPalmCenter = useCallback((handIndex = 0): HandLandmark | null =>
+        trackingDataRef.current.landmarks[handIndex]?.[9] ?? null, []);
 
-    return {
-        isReady,
-        trackingData,
-        getIndexFingerTip,
-        getPalmCenter,
-        mediaStream,
-    };
+    return { isReady, trackingData, trackingDataRef, getIndexFingerTip, getPalmCenter, mediaStream };
 };

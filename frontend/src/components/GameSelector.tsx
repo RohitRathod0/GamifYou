@@ -10,6 +10,7 @@ import { HandTrackingData } from '@/hooks/useHandTracking';
 interface GameSelectorProps {
     game: string;
     trackingData?: HandTrackingData;
+    trackingDataRef?: React.MutableRefObject<HandTrackingData>;
     playerId?: string;
     gameState?: any;
     onStateUpdate?: (state: any) => void;
@@ -19,6 +20,7 @@ interface GameSelectorProps {
 export const GameSelector: React.FC<GameSelectorProps> = ({
     game,
     trackingData = { landmarks: [], handedness: [] },
+    trackingDataRef,
     playerId = '',
     gameState = {},
     onStateUpdate = () => { },
@@ -29,12 +31,14 @@ export const GameSelector: React.FC<GameSelectorProps> = ({
             return (
                 <AirHockey
                     trackingData={trackingData}
+                    trackingDataRef={trackingDataRef}
                 />
             );
         case GAMES.BALLOON_POP:
             return (
                 <BalloonPop
                     trackingData={trackingData}
+                    trackingDataRef={trackingDataRef}
                     playerId={playerId}
                     gameState={gameState}
                     onStateUpdate={onStateUpdate}
@@ -52,6 +56,7 @@ export const GameSelector: React.FC<GameSelectorProps> = ({
             return (
                 <FacePuzzle
                     trackingData={trackingData}
+                    trackingDataRef={trackingDataRef}
                     playerId={playerId}
                 />
             );
@@ -59,6 +64,7 @@ export const GameSelector: React.FC<GameSelectorProps> = ({
             return (
                 <ScribbleDraw
                     trackingData={trackingData}
+                    trackingDataRef={trackingDataRef}
                     playerId={playerId}
                     sendMessage={sendMessage}
                 />

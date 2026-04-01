@@ -8,12 +8,14 @@ import { StrokeData } from './useFingerDraw';
 
 interface ScribbleDrawProps {
     trackingData: HandTrackingData;
+    trackingDataRef?: React.MutableRefObject<HandTrackingData>;
     playerId: string;
     sendMessage: (type: string, data: any) => void;
 } // Removed roomCode, appState, scribbleMessage as they were not used
 
 export const ScribbleDraw: React.FC<ScribbleDrawProps> = ({
     trackingData,
+    trackingDataRef,
     playerId,
     sendMessage
 }) => {
@@ -148,6 +150,7 @@ export const ScribbleDraw: React.FC<ScribbleDrawProps> = ({
                                 <div style={{ textAlign: 'center', color: '#60a5fa', fontWeight: 'bold', fontSize: '1.2rem', marginBottom: '10px' }}>You are drawing! Put your index and thumb together to draw.</div>
                                 <DrawerView 
                                     trackingData={trackingData}
+                                    trackingDataRef={trackingDataRef}
                                     playerId={playerId}
                                     onEmitStroke={handleSendStroke}
                                     onEmitClear={handleClear}

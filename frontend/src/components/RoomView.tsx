@@ -23,6 +23,7 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
 
     const [localStream, setLocalStream] = useState<MediaStream | null>(null);
     const [externalTrackingData, setExternalTrackingData] = useState<HandTrackingData>({ landmarks: [], handedness: [] });
+    const externalTrackingDataRef = useRef<React.MutableRefObject<HandTrackingData> | undefined>(undefined);
 
     // Fetch camera immediately
     useEffect(() => {
@@ -179,7 +180,10 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
             </div>
 
             {/* Existing VideoFeed gives us background swap. We pass its tracking data up */}
-            <VideoFeed localStream={localStream} onTrackingData={setExternalTrackingData} />
+            <VideoFeed localStream={localStream} onTrackingData={(data, dataRef) => {
+                setExternalTrackingData(data);
+                externalTrackingDataRef.current = dataRef;
+            }} />
 
             {/* Remote Video Picture-in-Picture Style */}
             {remoteStreams.size > 0 && (
@@ -207,6 +211,7 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                     <GameSelector
                         game={currentGame}
                         trackingData={externalTrackingData}
+                        trackingDataRef={externalTrackingDataRef.current}
                         playerId={playerId}
                         gameState={{ player1_id: playerId }}
                         onStateUpdate={() => { }}

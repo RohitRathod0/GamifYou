@@ -3,6 +3,7 @@ import { HandTrackingData } from '@/hooks/useHandTracking';
 
 interface AirHockeyProps {
     trackingData: HandTrackingData;
+    trackingDataRef?: React.MutableRefObject<HandTrackingData>;
 }
 
 interface Paddle {
@@ -25,11 +26,12 @@ interface Puck {
 
 export const AirHockey: React.FC<AirHockeyProps> = ({
     trackingData,
+    trackingDataRef,
 }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
 
     // Hand-to-paddle assignment tracking (locks hands to specific paddles)
-    const [handAssignments, setHandAssignments] = useState<{ red: number | null; blue: number | null }>({
+    const handAssignmentsRef = useRef<{ red: number | null; blue: number | null }>({
         red: null,
         blue: null,
     });
@@ -61,80 +63,7 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
         puckRef.current = puck;
     }, [puck]);
 
-    // Update BOTH paddles from hand tracking with hand-locking system
-    useEffect(() => {
-        if (trackingData.landmarks && trackingData.landmarks.length > 0 && canvasRef.current) {
-            const canvas = canvasRef.current;
-            const currentHandCount = trackingData.landmarks.length;
-
-            // Reset assignments if both hands were lost
-            if (lastSeenHandsRef.current === 0 && currentHandCount > 0) {
-                setHandAssignments({ red: null, blue: null });
-            }
-            lastSeenHandsRef.current = currentHandCount;
-
-            // Assign hands to paddles on first detection
-            if (handAssignments.red === null && handAssignments.blue === null && currentHandCount > 0) {
-                if (currentHandCount === 1) {
-                    // First hand detected -> assign to red paddle
-                    setHandAssignments({ red: 0, blue: null });
-                } else if (currentHandCount === 2) {
-                    // Two hands detected -> assign based on Y position
-                    const hand0Y = trackingData.landmarks[0][9]?.y || 0;
-                    const hand1Y = trackingData.landmarks[1][9]?.y || 0;
-
-                    if (hand0Y < hand1Y) {
-                        // Hand 0 is higher (top) -> red, Hand 1 is lower (bottom) -> blue
-                        setHandAssignments({ red: 0, blue: 1 });
-                    } else {
-                        // Hand 1 is higher (top) -> red, Hand 0 is lower (bottom) -> blue
-                        setHandAssignments({ red: 1, blue: 0 });
-                    }
-                }
-            } else if (handAssignments.red === null && handAssignments.blue !== null && currentHandCount === 2) {
-                // Blue is assigned, now assign red to the other hand
-                setHandAssignments(prev => ({ ...prev, red: prev.blue === 0 ? 1 : 0 }));
-            } else if (handAssignments.blue === null && handAssignments.red !== null && currentHandCount === 2) {
-                // Red is assigned, now assign blue to the other hand
-                setHandAssignments(prev => ({ ...prev, blue: prev.red === 0 ? 1 : 0 }));
-            }
-
-            // Helper to update paddle directly in ref (removes lag from useState)
-            const updatePaddleRef = (paddleRef: React.MutableRefObject<Paddle>, palmCenter: any) => {
-                const rawPointX = (1 - palmCenter.x) * canvas.width;
-                const rawPointY = palmCenter.y * canvas.height;
-                
-                const clampedX = Math.max(30, Math.min(rawPointX, canvas.width - 30));
-                const clampedY = Math.max(30, Math.min(rawPointY, canvas.height - 30));
-
-                const dt = 1; // Assuming constant tracking rate for simple vx/vy 
-                paddleRef.current.vx = (clampedX - paddleRef.current.rawX) / dt;
-                paddleRef.current.vy = (clampedY - paddleRef.current.rawY) / dt;
-                
-                paddleRef.current.rawX = clampedX;
-                paddleRef.current.rawY = clampedY;
-            };
-
-            // Update red paddle position (if assigned)
-            if (handAssignments.red !== null && trackingData.landmarks[handAssignments.red]) {
-                const palmCenter = trackingData.landmarks[handAssignments.red][9];
-                if (palmCenter) {
-                    updatePaddleRef(paddle1Ref, palmCenter);
-                }
-            }
-
-            // Update blue paddle position (if assigned)
-            if (handAssignments.blue !== null && trackingData.landmarks[handAssignments.blue]) {
-                const palmCenter = trackingData.landmarks[handAssignments.blue][9];
-                if (palmCenter) {
-                    updatePaddleRef(paddle2Ref, palmCenter);
-                }
-            }
-        } else if (trackingData.landmarks.length === 0) {
-            // No hands detected
-            lastSeenHandsRef.current = 0;
-        }
-    }, [trackingData, handAssignments]);
+    // Game logic for paddles moved entirely inside game loop
 
     // Game loop with physics
     useEffect(() => {
@@ -150,6 +79,63 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
             const currentTime = Date.now();
             const deltaTime = (currentTime - lastTime) / 16; // Normalize to 60fps
             lastTime = currentTime;
+
+            // --- Tracking Update ---
+            const currentData = trackingDataRef?.current || trackingData;
+            if (currentData.landmarks && currentData.landmarks.length > 0) {
+                const currentHandCount = currentData.landmarks.length;
+
+                if (lastSeenHandsRef.current === 0 && currentHandCount > 0) {
+                    handAssignmentsRef.current = { red: null, blue: null };
+                }
+                lastSeenHandsRef.current = currentHandCount;
+
+                if (handAssignmentsRef.current.red === null && handAssignmentsRef.current.blue === null && currentHandCount > 0) {
+                    if (currentHandCount === 1) {
+                        handAssignmentsRef.current = { red: 0, blue: null };
+                    } else if (currentHandCount === 2) {
+                        const hand0Y = currentData.landmarks[0][9]?.y || 0;
+                        const hand1Y = currentData.landmarks[1][9]?.y || 0;
+                        if (hand0Y < hand1Y) {
+                            handAssignmentsRef.current = { red: 0, blue: 1 };
+                        } else {
+                            handAssignmentsRef.current = { red: 1, blue: 0 };
+                        }
+                    }
+                } else if (handAssignmentsRef.current.red === null && handAssignmentsRef.current.blue !== null && currentHandCount === 2) {
+                    handAssignmentsRef.current.red = handAssignmentsRef.current.blue === 0 ? 1 : 0;
+                } else if (handAssignmentsRef.current.blue === null && handAssignmentsRef.current.red !== null && currentHandCount === 2) {
+                    handAssignmentsRef.current.blue = handAssignmentsRef.current.red === 0 ? 1 : 0;
+                }
+
+                const updatePaddleRef = (paddleRef: React.MutableRefObject<Paddle>, palmCenter: any) => {
+                    const rawPointX = (1 - palmCenter.x) * canvas.width;
+                    const rawPointY = palmCenter.y * canvas.height;
+                    
+                    const clampedX = Math.max(30, Math.min(rawPointX, canvas.width - 30));
+                    const clampedY = Math.max(30, Math.min(rawPointY, canvas.height - 30));
+
+                    const dt = 1; 
+                    paddleRef.current.vx = (clampedX - paddleRef.current.rawX) / dt;
+                    paddleRef.current.vy = (clampedY - paddleRef.current.rawY) / dt;
+                    
+                    paddleRef.current.rawX = clampedX;
+                    paddleRef.current.rawY = clampedY;
+                };
+
+                if (handAssignmentsRef.current.red !== null && currentData.landmarks[handAssignmentsRef.current.red]) {
+                    const palmCenter = currentData.landmarks[handAssignmentsRef.current.red][9];
+                    if (palmCenter) updatePaddleRef(paddle1Ref, palmCenter);
+                }
+
+                if (handAssignmentsRef.current.blue !== null && currentData.landmarks[handAssignmentsRef.current.blue]) {
+                    const palmCenter = currentData.landmarks[handAssignmentsRef.current.blue][9];
+                    if (palmCenter) updatePaddleRef(paddle2Ref, palmCenter);
+                }
+            } else if (currentData.landmarks.length === 0) {
+                lastSeenHandsRef.current = 0;
+            }
+            // --- End Tracking Update ---
 
             // Clear canvas
             ctx.clearRect(0, 0, canvas.width, canvas.height);

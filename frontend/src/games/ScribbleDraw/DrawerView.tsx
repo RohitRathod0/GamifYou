@@ -5,6 +5,7 @@ import { useFingerDraw, StrokeData } from './useFingerDraw';
 
 interface DrawerViewProps {
     trackingData: HandTrackingData;
+    trackingDataRef?: React.MutableRefObject<HandTrackingData>;
     playerId: string;
     onEmitStroke: (data: StrokeData) => void;
     onEmitClear: () => void;
@@ -13,7 +14,7 @@ interface DrawerViewProps {
 const COLORS = ['#000000', '#ef4444', '#3b82f6', '#22c55e', '#f59e0b', '#a855f7', '#ec4899', '#ffffff'];
 const SIZES = [2, 4, 8, 12, 16];
 
-export const DrawerView: React.FC<DrawerViewProps> = ({ trackingData, playerId, onEmitStroke, onEmitClear }) => {
+export const DrawerView: React.FC<DrawerViewProps> = ({ trackingData, trackingDataRef, playerId, onEmitStroke, onEmitClear }) => {
     const canvasRef = useRef<ScribbleCanvasRef>(null);
     const [color, setColor] = useState('#000000');
     const [brushSize, setBrushSize] = useState(4);
@@ -27,6 +28,7 @@ export const DrawerView: React.FC<DrawerViewProps> = ({ trackingData, playerId, 
 
     const { isDrawing, currentPoint } = useFingerDraw({
         trackingData,
+        trackingDataRef,
         canvasWidth: 800,
         canvasHeight: 600,
         enabled: true,

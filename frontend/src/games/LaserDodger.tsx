@@ -3,6 +3,7 @@ import { HandTrackingData } from '@/hooks/useHandTracking';
 
 interface LaserDodgerProps {
     trackingData: HandTrackingData;
+    trackingDataRef?: React.MutableRefObject<HandTrackingData>;
     playerId: string;
     gameState: any;
     onStateUpdate: (state: any) => void;
@@ -10,6 +11,7 @@ interface LaserDodgerProps {
 
 export const LaserDodger: React.FC<LaserDodgerProps> = ({
     trackingData,
+    trackingDataRef,
     playerId: _playerId,
     gameState: _gameState,
     onStateUpdate: _onStateUpdate,
@@ -28,31 +30,49 @@ export const LaserDodger: React.FC<LaserDodgerProps> = ({
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        let animationRef: number;
+        let running = true;
 
-        // Draw player silhouette
-        if (trackingData.landmarks[0]) {
-            ctx.fillStyle = '#00ff00';
-            trackingData.landmarks[0].forEach((landmark) => {
-                ctx.beginPath();
-                ctx.arc(
-                    landmark.x * canvas.width,
-                    landmark.y * canvas.height,
-                    5,
-                    0,
-                    Math.PI * 2
-                );
-                ctx.fill();
-            });
-        }
+        const drawLoop = () => {
+            if (!running) return;
 
-        // Placeholder text
-        ctx.fillStyle = '#ffffff';
-        ctx.font = '24px Arial';
-        ctx.textAlign = 'center';
-        ctx.fillText('Laser Dodger', canvas.width / 2, canvas.height / 2);
-        ctx.fillText('Dodge the lasers with your body!', canvas.width / 2, canvas.height / 2 + 40);
-    }, [trackingData]);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const activeData = trackingDataRef?.current || trackingData;
+
+            // Draw player silhouette
+            if (activeData.landmarks[0]) {
+                ctx.fillStyle = '#00ff00';
+                activeData.landmarks[0].forEach((landmark) => {
+                    ctx.beginPath();
+                    ctx.arc(
+                        landmark.x * canvas.width,
+                        landmark.y * canvas.height,
+                        5,
+                        0,
+                        Math.PI * 2
+                    );
+                    ctx.fill();
+                });
+            }
+
+            // Placeholder text
+            ctx.fillStyle = '#ffffff';
+            ctx.font = '24px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('Laser Dodger', canvas.width / 2, canvas.height / 2);
+            ctx.fillText('Dodge the lasers with your body!', canvas.width / 2, canvas.height / 2 + 40);
+
+            animationRef = requestAnimationFrame(drawLoop);
+        };
+        
+        drawLoop();
+
+        return () => {
+            running = false;
+            cancelAnimationFrame(animationRef);
+        };
+    }, [trackingData, trackingDataRef]);
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '20px' }}>

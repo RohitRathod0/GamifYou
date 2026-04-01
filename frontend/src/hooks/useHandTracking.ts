@@ -36,13 +36,50 @@ export const useHandTracking = (
         // ✅ Update ref immediately (no re-render, used by game loop)
         trackingDataRef.current = newData;
 
-        // ✅ Update state at most once when detection status CHANGES
+        // ✅ Update state ONLY when detection status changes or hand moves significantly
         setTrackingData(prev => {
             const wasEmpty = prev.landmarks.length === 0;
             const isEmpty = newData.landmarks.length === 0;
             if (wasEmpty !== isEmpty) return newData; // status changed → update
-            if (!isEmpty) return newData;              // hands present → always update
-            return prev;                               // both empty → skip re-render
+            
+            if (!isEmpty) {
+                // Euclidean diff to prevent micro-jitter re-renders
+                let moved = false;
+                const HAND_COUNT = Math.max(prev.landmarks.length, newData.landmarks.length);
+                
+                for (let i = 0; i < HAND_COUNT; i++) {
+                    const pHand = prev.landmarks[i];
+                    const nHand = newData.landmarks[i];
+                    
+                    if (!pHand || !nHand) {
+                        moved = true; 
+                        break;
+                    }
+                    
+                    // Check Palm (9) and Index Tip (8)
+                    const pCenter = pHand[9];
+                    const nCenter = nHand[9];
+                    const pTip = pHand[8];
+                    const nTip = nHand[8];
+                    
+                    if (!pCenter || !nCenter || !pTip || !nTip) {
+                        moved = true;
+                        break;
+                    }
+                    
+                    const distCenter = Math.hypot(pCenter.x - nCenter.x, pCenter.y - nCenter.y);
+                    const distTip = Math.hypot(pTip.x - nTip.x, pTip.y - nTip.y);
+                    
+                    // 0.005 normalized distance is roughly 3-4 pixels on a 640x480 screen
+                    if (distCenter > 0.005 || distTip > 0.005) {
+                        moved = true;
+                        break;
+                    }
+                }
+                
+                if (moved) return newData;
+            }
+            return prev; // No significant change → skip re-render
         });
     }, []);
 

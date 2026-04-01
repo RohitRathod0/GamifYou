@@ -55,6 +55,7 @@ const DEAD_ZONE_RADIUS = 2.5; // Pixels distance to ignore micro-movements
 
 export const useFingerDraw = ({
     trackingData,
+    trackingDataRef,
     canvasWidth,
     canvasHeight,
     enabled,
@@ -64,6 +65,7 @@ export const useFingerDraw = ({
     onEmitStroke
 }: {
     trackingData: HandTrackingData;
+    trackingDataRef?: React.MutableRefObject<HandTrackingData>;
     canvasWidth: number;
     canvasHeight: number;
     enabled: boolean;
@@ -106,85 +108,103 @@ export const useFingerDraw = ({
     }, [enabled, color, brushSize, onEmitStroke]);
 
     useEffect(() => {
-        if (!enabled) {
-            if (isDrawingRef.current) {
-                isDrawingRef.current = false;
-                setIsDrawing(false);
-                setCurrentPoint(null);
-                lastPoint.current = null;
-            }
-            kalmanX.current.reset(NaN);
-            kalmanY.current.reset(NaN);
-            return;
-        }
+        let running = true;
+        const rafId = { current: 0 };
 
-        const landmarks = trackingData.landmarks[0];
-        if (!landmarks || landmarks.length < 21) {
-            if (isDrawingRef.current) {
-                isDrawingRef.current = false;
-                setIsDrawing(false);
-                setCurrentPoint(null);
-                lastPoint.current = null;
-                onEmitStroke({ points: [], color, brushSize, isEnd: true });
-            }
-            kalmanX.current.reset(NaN);
-            kalmanY.current.reset(NaN);
-            return;
-        }
+        const loop = () => {
+            if (!running) return;
+            rafId.current = requestAnimationFrame(loop);
 
-        const pinchDist = getPinchDistance(landmarks);
-        const isPinching = pinchDist < 0.05;
-
-        const indexTip = landmarks[8];
-        const rawPoint = landmarkToCanvas(indexTip, canvasWidth, canvasHeight, mirror);
-        
-        // Pass through Kalman Filter
-        let kx = kalmanX.current.update(rawPoint.x);
-        let ky = kalmanY.current.update(rawPoint.y);
-
-        // Apply Dead Zone (Stability Filter)
-        if (lastPoint.current) {
-            const dx = kx - lastPoint.current.x;
-            const dy = ky - lastPoint.current.y;
-            const dist = Math.sqrt(dx * dx + dy * dy);
-
-            // Normalize distance effectively checks threshold scaling logic
-            if (dist < DEAD_ZONE_RADIUS) {
-                kx = lastPoint.current.x;
-                ky = lastPoint.current.y;
-            }
-        }
-
-        const point = { x: Math.round(kx), y: Math.round(ky) }; // Clean, whole pixels
-        lastPoint.current = point;
-
-        setCurrentPoint(point);
-
-        if (isPinching) {
-            if (!isDrawingRef.current) {
-                isDrawingRef.current = true;
-                setIsDrawing(true);
-            }
-            bufferRef.current.push(point);
-            
-        } else {
-            if (isDrawingRef.current) {
-                isDrawingRef.current = false;
-                setIsDrawing(false);
-                
-                if (bufferRef.current.length > 0) {
-                     onEmitStroke({
-                         points: [...bufferRef.current],
-                         color,
-                         brushSize,
-                         isEnd: false
-                     });
-                     bufferRef.current = [];
+            if (!enabled) {
+                if (isDrawingRef.current) {
+                    isDrawingRef.current = false;
+                    setIsDrawing(false);
+                    setCurrentPoint(null);
+                    lastPoint.current = null;
                 }
-                onEmitStroke({ points: [], color, brushSize, isEnd: true });
+                kalmanX.current.reset(NaN);
+                kalmanY.current.reset(NaN);
+                return;
             }
-        }
-    }, [trackingData, enabled, canvasWidth, canvasHeight, mirror, color, brushSize, onEmitStroke]);
+
+            const activeData = trackingDataRef?.current || trackingData;
+            const landmarks = activeData.landmarks[0];
+            
+            if (!landmarks || landmarks.length < 21) {
+                if (isDrawingRef.current) {
+                    isDrawingRef.current = false;
+                    setIsDrawing(false);
+                    setCurrentPoint(null);
+                    lastPoint.current = null;
+                    onEmitStroke({ points: [], color, brushSize, isEnd: true });
+                }
+                kalmanX.current.reset(NaN);
+                kalmanY.current.reset(NaN);
+                return;
+            }
+
+            const pinchDist = getPinchDistance(landmarks);
+            const isPinching = pinchDist < 0.05;
+
+            const indexTip = landmarks[8];
+            const rawPoint = landmarkToCanvas(indexTip, canvasWidth, canvasHeight, mirror);
+            
+            // Pass through Kalman Filter
+            let kx = kalmanX.current.update(rawPoint.x);
+            let ky = kalmanY.current.update(rawPoint.y);
+
+            // Apply Dead Zone (Stability Filter)
+            if (lastPoint.current) {
+                const dx = kx - lastPoint.current.x;
+                const dy = ky - lastPoint.current.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+
+                // Normalize distance effectively checks threshold scaling logic
+                if (dist < DEAD_ZONE_RADIUS) {
+                    kx = lastPoint.current.x;
+                    ky = lastPoint.current.y;
+                }
+            }
+
+            const point = { x: Math.round(kx), y: Math.round(ky) }; // Clean, whole pixels
+            lastPoint.current = point;
+
+            // Only update state if significantly changed to avoid re-renders
+            setCurrentPoint(prev => prev && prev.x === point.x && prev.y === point.y ? prev : point);
+
+            if (isPinching) {
+                if (!isDrawingRef.current) {
+                    isDrawingRef.current = true;
+                    setIsDrawing(true);
+                }
+                bufferRef.current.push(point);
+                
+            } else {
+                if (isDrawingRef.current) {
+                    isDrawingRef.current = false;
+                    setIsDrawing(false);
+                    
+                    if (bufferRef.current.length > 0) {
+                         onEmitStroke({
+                             points: [...bufferRef.current],
+                             color,
+                             brushSize,
+                             isEnd: false
+                         });
+                         bufferRef.current = [];
+                    }
+                    onEmitStroke({ points: [], color, brushSize, isEnd: true });
+                }
+            }
+        };
+
+        rafId.current = requestAnimationFrame(loop);
+        
+        return () => {
+            running = false;
+            cancelAnimationFrame(rafId.current);
+        };
+    }, [enabled, canvasWidth, canvasHeight, mirror, color, brushSize, trackingData, trackingDataRef, onEmitStroke]);
 
     return {
         isDrawing,

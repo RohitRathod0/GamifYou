@@ -7,7 +7,7 @@ import { getSegmentation } from '@/features/background/segmentationSingleton';
 
 interface VideoFeedProps {
     localStream?: MediaStream | null;
-    onTrackingData?: (data: any) => void;
+    onTrackingData?: (data: any, dataRef?: React.MutableRefObject<any>) => void;
 }
 
 const QUICK_BG: { label: string; emoji: string; config: BackgroundConfig }[] = [
@@ -43,10 +43,10 @@ export const VideoFeed: React.FC<VideoFeedProps> = ({ localStream = undefined, o
     useEffect(() => { bgConfigRef.current = bgConfig; }, [bgConfig]);
 
     // ── Hand tracking ─────────────────────────────────────────────────────────
-    const { isReady: trackingReady, trackingData } = useHandTracking(videoRef, localStream);
+    const { isReady: trackingReady, trackingData, trackingDataRef } = useHandTracking(videoRef, localStream);
     useEffect(() => {
-        if (onTrackingData && trackingData) onTrackingData(trackingData);
-    }, [trackingData, onTrackingData]);
+        if (onTrackingData && trackingData) onTrackingData(trackingData, trackingDataRef);
+    }, [trackingData, trackingDataRef, onTrackingData]);
 
     // ── Pre-blur helper ───────────────────────────────────────────────────────
     const getBlurredBg = (video: HTMLVideoElement, W: number, H: number, px: number) => {

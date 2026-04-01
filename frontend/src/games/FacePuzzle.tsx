@@ -75,13 +75,13 @@ function slideTile(tiles: number[], tr: number, tc: number): number[] | null {
 }
 
 // ── Props / types ─────────────────────────────────────────────────────────────
-interface FacePuzzleProps { trackingData: HandTrackingData; playerId?: string; }
+interface FacePuzzleProps { trackingData: HandTrackingData; trackingDataRef?: React.MutableRefObject<HandTrackingData>; playerId?: string; }
 interface SwipeOrigin { x: number; y: number; row: number; col: number; }
 interface Anim { tile: number; fromI: number; toI: number; start: number; }
 interface BBox { minX: number; minY: number; maxX: number; maxY: number; }
 
 // ── Component ─────────────────────────────────────────────────────────────────
-export const FacePuzzle: React.FC<FacePuzzleProps> = ({ trackingData }) => {
+export const FacePuzzle: React.FC<FacePuzzleProps> = ({ trackingData, trackingDataRef }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const videoRef = useRef<HTMLVideoElement>(null);
     const rafRef = useRef<number>(0);
@@ -110,13 +110,16 @@ export const FacePuzzle: React.FC<FacePuzzleProps> = ({ trackingData }) => {
     const flashTileTs = useRef<number>(0);
 
     // Shared
-    const trackingRef = useRef(trackingData);
+    const localTrackingRef = useRef(trackingData);
+    const activeTrackingRef = trackingDataRef || localTrackingRef;
 
     // React state (for DOM only)
     const [phase, setPhase] = useState<Phase>('draw');
     const [videoReady, setVideoReady] = useState(false);
 
-    useEffect(() => { trackingRef.current = trackingData; }, [trackingData]);
+    useEffect(() => { 
+        if (!trackingDataRef) localTrackingRef.current = trackingData; 
+    }, [trackingData, trackingDataRef]);
 
     // ── Camera stream (display + capture — no MediaPipe) ──────────────────────
     useEffect(() => {
@@ -215,7 +218,7 @@ export const FacePuzzle: React.FC<FacePuzzleProps> = ({ trackingData }) => {
         ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
 
         // ── All hand skeletons ────────────────────────────────────────────────
-        const td = trackingRef.current;
+        const td = activeTrackingRef.current;
         td.landmarks.forEach(lm => {
             const hlm = lm as HandLandmark[];
             // Simple pinch check inline

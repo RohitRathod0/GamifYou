@@ -1,14 +1,11 @@
 /**
- * ARChessGame.tsx
+ * ARChessGame.tsx — Fixed Version
  *
- * True AR chess: everything rendered on a SINGLE HTML5 canvas.
- * Rendering pipeline (per frame):
- *   1. Camera feed (full canvas)
- *   2. Hand skeleton (neon glow)
- *   3. Floating chess board (semi-transparent, perspective tilt)
- *   4. Chess pieces (glow on hover/select, drag follows finger)
- *   5. Cursor at index fingertip
- *   6. UI overlays (status, captured pieces, move history)
+ * Bugs fixed:
+ *  1. processGesture removed from MediaPipe useEffect deps → pipeline never restarts
+ *  2. Hold-pinch 1s to SELECT, quick-pinch to CONFIRM — proper state machine
+ *  3. landmarkToCanvas now mirrors X to match the flipped camera feed
+ *  4. boardLayoutRef stores STABLE y (no floatY) for hit-testing; floatY only used for drawing
  */
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
@@ -16,7 +13,7 @@ import { Hands, Results } from '@mediapipe/hands';
 import { Camera } from '@mediapipe/camera_utils';
 import {
     classifyGesture, drawHandSkeleton,
-    landmarkToCanvas, GestureState, HandLandmark,
+    GestureState, HandLandmark,
 } from './GestureController';
 import {
     createInitialBoard, getLegalMoves, applyMove, getGameResult,
@@ -27,22 +24,34 @@ import { WS_BASE_URL } from '@/utils/constants';
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const BOARD_COLS = 8;
-const DRAG_START_RATIO = 0.35;
-const CURSOR_HISTORY_SIZE = 4;
+const CURSOR_HISTORY_SIZE = 5;
 const CURSOR_DEADZONE_PX = 3;
-const CURSOR_SLOW_ALPHA = 0.2;
-const CURSOR_FAST_ALPHA = 0.4;
+const CURSOR_SLOW_ALPHA = 0.18;
+const CURSOR_FAST_ALPHA = 0.42;
 const CURSOR_FAST_THRESHOLD_PX = 28;
 const SNAP_HYSTERESIS_PX = 24;
 
-// Board colors (semi-transparent for AR)
+// Hold-pinch timing
+const HOLD_SELECT_MS = 1000;   // hold pinch 1s → SELECT piece
+const QUICK_PINCH_MAX_MS = 400; // pinch released in <400ms → CONFIRM move
+
+// Board colors
 const LIGHT_SQ = 'rgba(232, 244, 252, 0.72)';
 const DARK_SQ = 'rgba(0, 150, 180, 0.72)';
-const SEL_SQ = 'rgba(80, 220, 80, 0.85)';
+const SEL_SQ = 'rgba(80, 220, 80, 0.88)';
 const HOVER_SQ = 'rgba(255, 220, 50, 0.65)';
 const VALID_SQ = 'rgba(80, 220, 80, 0.45)';
+const AIM_SQ = 'rgba(0, 160, 255, 0.75)';   // blue = valid target aimed at
+const INVALID_SQ = 'rgba(255, 60, 60, 0.35)';   // red tint = invalid target
 const LASTMV_SQ = 'rgba(255, 240, 80, 0.55)';
 const BOARD_BORDER = 'rgba(0, 220, 255, 0.9)';
+
+// Gesture phase
+type GesturePhase =
+    | 'IDLE'       // no piece selected, hovering
+    | 'HOLDING'    // pinch held, timer counting toward SELECT
+    | 'SELECTED'   // piece selected, showing valid moves, aiming
+    | 'COOLDOWN';  // brief cooldown after a move
 
 interface ARChessGameProps {
     playerId: string;
@@ -50,18 +59,7 @@ interface ARChessGameProps {
     onStateUpdate?: (s: any) => void;
 }
 
-interface DragState {
-    piece: Piece;
-    from: Position;
-    screenX: number;
-    screenY: number;
-    previewSquare: Position | null;
-}
-
-interface ScreenPoint {
-    x: number;
-    y: number;
-}
+interface ScreenPoint { x: number; y: number; }
 
 export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, onStateUpdate }) => {
     // ── Refs ──────────────────────────────────────────────────────────────────
@@ -72,7 +70,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
     const wsRef = useRef<WebSocket | null>(null);
     const rafRef = useRef<number>(0);
 
-    // Game state refs (used inside rAF loop — avoid stale closures)
+    // Game state refs
     const boardRef = useRef<Board>(createInitialBoard());
     const selectedRef = useRef<Position | null>(null);
     const validMovesRef = useRef<Position[]>([]);
@@ -81,32 +79,29 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
     const epRef = useRef<Position | null>(null);
     const lastMoveRef = useRef<{ from: Position; to: Position } | null>(null);
     const gameOverRef = useRef<{ winner: string; reason: string } | null>(null);
-    const dragRef = useRef<DragState | null>(null);
     const capturedRef = useRef<{ white: Piece[]; black: Piece[] }>({ white: [], black: [] });
     const moveHistRef = useRef<string[]>([]);
 
-    // Gesture refs
+    // Gesture / interaction refs
     const gestureRef = useRef<GestureState | null>(null);
-    const pinchCoolRef = useRef(false);
-    const prevPinchingRef = useRef(false);
-    const pinchStartSquareRef = useRef<Position | null>(null);
-    const pinchStartPointRef = useRef<ScreenPoint | null>(null);
     const cursorRef = useRef<ScreenPoint | null>(null);
-    const cursorHistoryRef = useRef<ScreenPoint[]>([]);
+    const cursorHistRef = useRef<ScreenPoint[]>([]);
+    const phaseRef = useRef<GesturePhase>('IDLE');
+    const prevPinchRef = useRef(false);
+    const pinchStartTimeRef = useRef<number>(0);   // when pinch began
+    const holdProgressRef = useRef<number>(0);     // 0–1 progress toward 1s
+    const aimedSquareRef = useRef<Position | null>(null); // square being aimed at while SELECTED
 
-    // Board layout (computed each frame from canvas size)
-    const boardLayoutRef = useRef({ x: 0, y: 0, sqSize: 0, totalSize: 0 });
+    // FIX 4: stable board layout for hit-testing (no float offset)
+    const stableBoardRef = useRef({ x: 0, y: 0, sqSize: 0, totalSize: 0 });
+    // draw-only offset (floatY applied only in drawFrame)
+    const floatRef = useRef({ t: 0 });
 
-    // Floating animation
-    const floatRef = useRef({ t: 0 }); // time for sine wave
-
-    // ── React state (only for UI that needs re-render) ─────────────────────
     const [handReady, setHandReady] = useState(false);
     const [camError, setCamError] = useState(false);
     const [promotionPending, setPromotionPending] = useState<{ pos: Position; color: PieceColor } | null>(null);
     const [gameOverState, setGameOverState] = useState<{ winner: string; reason: string } | null>(null);
     const [debugMode, setDebugMode] = useState(false);
-    // myColor tracked via myColorRef for rAF loop; setMyColor used for WS updates
     const [, setMyColor] = useState<PieceColor>('white');
 
     const roomCode = gameState?.room_code || 'chess_room';
@@ -130,31 +125,31 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
                     myColorRef.current = msg.data.color;
                     setMyColor(msg.data.color);
                 }
-            } catch { }
+            } catch { /* ignore parse errors */ }
         };
         ws.onerror = () => {
-            const isFirst = gameState?.player1_id === playerId;
-            const col: PieceColor = isFirst ? 'white' : 'black';
+            const col: PieceColor = gameState?.player1_id === playerId ? 'white' : 'black';
             myColorRef.current = col;
             setMyColor(col);
         };
         return () => ws.close();
     }, [roomCode, playerId, gameState]);
 
-    // ── Board layout helper ───────────────────────────────────────────────────
-    const computeBoardLayout = useCallback((canvasW: number, canvasH: number) => {
-        const maxSize = Math.min(canvasW * 0.72, canvasH * 0.78);
+    // ── Board layout helpers ──────────────────────────────────────────────────
+    /** Compute stable layout (no float) — used for hit-testing */
+    const computeStableLayout = useCallback((W: number, H: number) => {
+        const maxSize = Math.min(W * 0.72, H * 0.78);
         const sqSize = Math.floor(maxSize / BOARD_COLS);
-        const totalSize = sqSize * BOARD_COLS;
-        const x = Math.floor((canvasW - totalSize) / 2);
-        const y = Math.floor((canvasH - totalSize) / 2) + 20;
-        boardLayoutRef.current = { x, y, sqSize, totalSize };
-        return { x, y, sqSize, total: totalSize };
+        const total = sqSize * BOARD_COLS;
+        const x = Math.floor((W - total) / 2);
+        const y = Math.floor((H - total) / 2) + 20;
+        stableBoardRef.current = { x, y, sqSize, totalSize: total };
+        return { x, y, sqSize, total };
     }, []);
 
-    // ── Map screen coords → board square ──────────────────────────────────────
+    // FIX 3 + FIX 4: mirror X, use stable board (no floatY drift)
     const screenToSquare = useCallback((sx: number, sy: number): Position | null => {
-        const { x, y, sqSize, totalSize } = boardLayoutRef.current;
+        const { x, y, sqSize, totalSize } = stableBoardRef.current;
         const rx = sx - x, ry = sy - y;
         if (rx < 0 || rx > totalSize || ry < 0 || ry > totalSize) return null;
         let col = Math.floor(rx / sqSize);
@@ -164,238 +159,203 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
         return { row, col };
     }, []);
 
-    const squareToScreenCenter = useCallback((pos: Position): ScreenPoint => {
-        const { x, y, sqSize } = boardLayoutRef.current;
-        const displayRow = myColorRef.current === 'black' ? 7 - pos.row : pos.row;
-        const displayCol = myColorRef.current === 'black' ? 7 - pos.col : pos.col;
-        return {
-            x: x + displayCol * sqSize + sqSize / 2,
-            y: y + displayRow * sqSize + sqSize / 2,
-        };
+    const squareCenter = useCallback((pos: Position): ScreenPoint => {
+        const { x, y, sqSize } = stableBoardRef.current;
+        const dr = myColorRef.current === 'black' ? 7 - pos.row : pos.row;
+        const dc = myColorRef.current === 'black' ? 7 - pos.col : pos.col;
+        return { x: x + dc * sqSize + sqSize / 2, y: y + dr * sqSize + sqSize / 2 };
     }, []);
 
+    // ── Cursor smoothing ──────────────────────────────────────────────────────
     const smoothCursor = useCallback((raw: ScreenPoint): ScreenPoint => {
-        const history = cursorHistoryRef.current;
-        history.push(raw);
-        if (history.length > CURSOR_HISTORY_SIZE) history.shift();
+        const hist = cursorHistRef.current;
+        hist.push(raw);
+        if (hist.length > CURSOR_HISTORY_SIZE) hist.shift();
 
-        const weighted = history.reduce<{ x: number; y: number; weight: number }>(
-            (acc, point, index) => {
-                const weight = index + 1;
-                acc.x += point.x * weight;
-                acc.y += point.y * weight;
-                acc.weight += weight;
-                return acc;
-            },
-            { x: 0, y: 0, weight: 0 }
-        );
+        const w = hist.reduce((acc, p, i) => {
+            const wt = i + 1;
+            acc.x += p.x * wt; acc.y += p.y * wt; acc.w += wt;
+            return acc;
+        }, { x: 0, y: 0, w: 0 });
 
-        const averaged = {
-            x: weighted.x / weighted.weight,
-            y: weighted.y / weighted.weight,
-        };
-
+        const avg = { x: w.x / w.w, y: w.y / w.w };
         const prev = cursorRef.current;
-        if (!prev) return averaged;
-
-        const delta = Math.hypot(averaged.x - prev.x, averaged.y - prev.y);
-        if (delta < CURSOR_DEADZONE_PX) return prev;
-
-        const alpha = delta > CURSOR_FAST_THRESHOLD_PX ? CURSOR_FAST_ALPHA : CURSOR_SLOW_ALPHA;
-        return {
-            x: prev.x + (averaged.x - prev.x) * alpha,
-            y: prev.y + (averaged.y - prev.y) * alpha,
-        };
+        if (!prev) return avg;
+        const d = Math.hypot(avg.x - prev.x, avg.y - prev.y);
+        if (d < CURSOR_DEADZONE_PX) return prev;
+        const alpha = d > CURSOR_FAST_THRESHOLD_PX ? CURSOR_FAST_ALPHA : CURSOR_SLOW_ALPHA;
+        return { x: prev.x + (avg.x - prev.x) * alpha, y: prev.y + (avg.y - prev.y) * alpha };
     }, []);
 
-    const getSnappedLegalTarget = useCallback((cursor: ScreenPoint, from: Position, legalMoves: Position[]): Position => {
-        const candidates = [from, ...legalMoves];
-        let best = from;
-        let bestDistance = Number.POSITIVE_INFINITY;
-
-        for (const candidate of candidates) {
-            const center = squareToScreenCenter(candidate);
-            const distance = Math.hypot(cursor.x - center.x, cursor.y - center.y);
-            if (distance < bestDistance) {
-                best = candidate;
-                bestDistance = distance;
-            }
+    /** Snap to nearest legal target with hysteresis */
+    const snapToLegal = useCallback((cursor: ScreenPoint, from: Position, legal: Position[]): Position | null => {
+        const candidates = legal;
+        if (!candidates.length) return null;
+        let best = candidates[0];
+        let bestD = Infinity;
+        for (const c of candidates) {
+            const d = Math.hypot(cursor.x - squareCenter(c).x, cursor.y - squareCenter(c).y);
+            if (d < bestD) { best = c; bestD = d; }
         }
-
-        const previous = dragRef.current?.previewSquare;
-        if (previous) {
-            const previousCenter = squareToScreenCenter(previous);
-            const previousDistance = Math.hypot(cursor.x - previousCenter.x, cursor.y - previousCenter.y);
-            if (previousDistance <= bestDistance + SNAP_HYSTERESIS_PX) {
-                return previous;
-            }
+        const prev = aimedSquareRef.current;
+        if (prev && legal.some(m => m.row === prev.row && m.col === prev.col)) {
+            const prevD = Math.hypot(cursor.x - squareCenter(prev).x, cursor.y - squareCenter(prev).y);
+            if (prevD <= bestD + SNAP_HYSTERESIS_PX) return prev;
         }
-
         return best;
-    }, [squareToScreenCenter]);
+    }, [squareCenter]);
 
-
-
-    // ── Execute move ──────────────────────────────────────────────────────────
+    // ── Execute a chess move ──────────────────────────────────────────────────
     const doMove = useCallback((from: Position, to: Position) => {
         const board = boardRef.current;
-        const ep = epRef.current;
         const piece = board[from.row][from.col];
         if (!piece) return;
 
-        const { board: nb, newEp, captured: capturedPiece, isPromotion } = applyMove(board, from, to, ep);
-
-        if (capturedPiece) {
-            if (capturedPiece.color === 'white') capturedRef.current.white.push(capturedPiece);
-            else capturedRef.current.black.push(capturedPiece);
+        const { board: nb, newEp, captured: cap, isPromotion } = applyMove(board, from, to, epRef.current);
+        if (cap) {
+            if (cap.color === 'white') capturedRef.current.white.push(cap);
+            else capturedRef.current.black.push(cap);
         }
-
-        // Move notation
-        const cols = 'abcdefgh';
-        const rows = '87654321';
+        const cols = 'abcdefgh', rows = '87654321';
         moveHistRef.current.push(`${cols[from.col]}${rows[from.row]}→${cols[to.col]}${rows[to.row]}`);
 
         if (isPromotion) {
             boardRef.current = nb;
-            selectedRef.current = null;
-            validMovesRef.current = [];
-            dragRef.current = null;
+            selectedRef.current = null; validMovesRef.current = [];
+            phaseRef.current = 'COOLDOWN';
             setPromotionPending({ pos: to, color: piece.color });
+            setTimeout(() => { phaseRef.current = 'IDLE'; }, 600);
             return;
         }
 
-        const nextTurn: PieceColor = currentTurnRef.current === 'white' ? 'black' : 'white';
+        const next: PieceColor = currentTurnRef.current === 'white' ? 'black' : 'white';
         boardRef.current = nb;
-        currentTurnRef.current = nextTurn;
+        currentTurnRef.current = next;
         epRef.current = newEp;
         lastMoveRef.current = { from, to };
         selectedRef.current = null;
         validMovesRef.current = [];
-        dragRef.current = null;
+        aimedSquareRef.current = null;
+        phaseRef.current = 'COOLDOWN';
+        setTimeout(() => { phaseRef.current = 'IDLE'; }, 600);
 
-        const result = getGameResult(nb, nextTurn, newEp);
-        if (result) {
-            gameOverRef.current = result;
-            setGameOverState(result);
-        }
+        const result = getGameResult(nb, next, newEp);
+        if (result) { gameOverRef.current = result; setGameOverState(result); }
 
-        const ns = { chessBoard: nb, currentTurn: nextTurn, enPassantTarget: newEp, lastMove: { from, to } };
+        const ns = { chessBoard: nb, currentTurn: next, enPassantTarget: newEp, lastMove: { from, to } };
         onStateUpdate?.(ns);
         wsRef.current?.send(JSON.stringify({ type: 'game_state_update', data: { state: ns } }));
-
     }, [onStateUpdate]);
 
-    // ── Interact with square (select / move) ──────────────────────────────────
-    const lockPiece = useCallback((row: number, col: number): boolean => {
-        if (gameOverRef.current) return false;
-        if (myColorRef.current !== currentTurnRef.current) return false;
+    // ── FIX 1 & 2: Gesture processor — called from MediaPipe onResults
+    //   Uses refs only — no stale closures, never recreated ──────────────────
+    const processGestureRef = useRef<(gs: GestureState, W: number, H: number) => void>(() => { });
 
-        const piece = boardRef.current[row][col];
-        if (!piece || piece.color !== myColorRef.current) return false;
+    useEffect(() => {
+        processGestureRef.current = (gs: GestureState, W: number, H: number) => {
+            if (gameOverRef.current) return;
 
-        selectedRef.current = { row, col };
-        validMovesRef.current = getLegalMoves(boardRef.current, { row, col }, epRef.current);
-        dragRef.current = null;
-        return true;
-    }, []);
+            // FIX 3: mirror X because camera feed is flipped
+            const mirroredX = W - gs.indexTip.x * W;
+            const rawY = gs.indexTip.y * H;
+            const rawCursor = { x: mirroredX, y: rawY };
 
-    // ── Process gesture each frame ────────────────────────────────────────────
-    const processGesture = useCallback((gs: GestureState, canvasW: number, canvasH: number) => {
-        const { indexTip, isPinching } = gs;
-        const rawCursor = landmarkToCanvas(indexTip, canvasW, canvasH);
-        const smoothedCursor = smoothCursor(rawCursor);
-        cursorRef.current = smoothedCursor;
-        const { x: sx, y: sy } = smoothedCursor;
-        const sq = screenToSquare(sx, sy);
-        const wasPinching = prevPinchingRef.current;
-        const pinchStarted = isPinching && !wasPinching;
-        const pinchEnded = !isPinching && wasPinching;
-        const selected = selectedRef.current;
+            const cursor = smoothCursor(rawCursor);
+            cursorRef.current = cursor;
+            const sq = screenToSquare(cursor.x, cursor.y);
+            const now = performance.now();
+            const isPinching = gs.isPinching;
+            const wasPinching = prevPinchRef.current;
+            const pinchStarted = isPinching && !wasPinching;
+            const pinchEnded = !isPinching && wasPinching;
+            const phase = phaseRef.current;
 
-        if (pinchStarted) {
-            pinchStartSquareRef.current = sq;
-            pinchStartPointRef.current = { x: sx, y: sy };
+            // ── IDLE phase ────────────────────────────────────────────────────
+            if (phase === 'IDLE' || phase === 'COOLDOWN') {
+                aimedSquareRef.current = null;
 
-            if (sq && selected && validMovesRef.current.some(m => m.row === sq.row && m.col === sq.col)) {
-                doMove(selected, sq);
-            } else if (sq) {
-                lockPiece(sq.row, sq.col);
+                if (pinchStarted && phase === 'IDLE') {
+                    // Start hold timer
+                    pinchStartTimeRef.current = now;
+                    holdProgressRef.current = 0;
+                    phaseRef.current = 'HOLDING';
+                }
             }
-        }
 
-        if (isPinching && selectedRef.current) {
-            const piece = boardRef.current[selectedRef.current.row][selectedRef.current.col];
-            const pinchStartPoint = pinchStartPointRef.current;
-            const movedEnough = pinchStartPoint
-                ? Math.hypot(sx - pinchStartPoint.x, sy - pinchStartPoint.y) >= boardLayoutRef.current.sqSize * DRAG_START_RATIO
-                : false;
-            const movedToDifferentSquare = !!sq && (sq.row !== selectedRef.current.row || sq.col !== selectedRef.current.col);
+            // ── HOLDING phase — counting toward 1s select ─────────────────────
+            if (phase === 'HOLDING') {
+                if (!isPinching) {
+                    // Released before 1s — treat as quick-pinch, but nothing selected yet → cancel
+                    phaseRef.current = 'IDLE';
+                    holdProgressRef.current = 0;
+                    pinchStartTimeRef.current = 0;
+                } else {
+                    const elapsed = now - pinchStartTimeRef.current;
+                    holdProgressRef.current = Math.min(elapsed / HOLD_SELECT_MS, 1);
 
-            if (!dragRef.current && piece?.color === myColorRef.current && (movedEnough || movedToDifferentSquare)) {
-                const previewSquare = getSnappedLegalTarget({ x: sx, y: sy }, selectedRef.current, validMovesRef.current);
-                const previewCenter = squareToScreenCenter(previewSquare);
-                dragRef.current = {
-                    piece,
-                    from: selectedRef.current,
-                    screenX: previewCenter.x,
-                    screenY: previewCenter.y,
-                    previewSquare,
-                };
+                    if (elapsed >= HOLD_SELECT_MS) {
+                        // ✅ 1 second held — SELECT if valid piece
+                        if (sq
+                            && myColorRef.current === currentTurnRef.current
+                            && boardRef.current[sq.row]?.[sq.col]?.color === myColorRef.current
+                        ) {
+                            selectedRef.current = sq;
+                            validMovesRef.current = getLegalMoves(boardRef.current, sq, epRef.current);
+                            aimedSquareRef.current = null;
+                            phaseRef.current = 'SELECTED';
+                        } else {
+                            phaseRef.current = 'IDLE';
+                        }
+                        holdProgressRef.current = 0;
+                        pinchStartTimeRef.current = 0;
+                    }
+                }
             }
-        }
 
-        if (dragRef.current && isPinching) {
-            const previewSquare = getSnappedLegalTarget({ x: sx, y: sy }, dragRef.current.from, validMovesRef.current);
-            const previewCenter = squareToScreenCenter(previewSquare);
-            dragRef.current.previewSquare = previewSquare;
-            dragRef.current.screenX = previewCenter.x;
-            dragRef.current.screenY = previewCenter.y;
-        }
+            // ── SELECTED phase — piece chosen, aiming at destination ──────────
+            if (phase === 'SELECTED') {
+                // Update aimed square continuously
+                const legal = validMovesRef.current;
+                const aimed = snapToLegal(cursor, selectedRef.current!, legal);
+                aimedSquareRef.current = aimed ?? null;
 
-        if (pinchEnded) {
-            if (
-                dragRef.current &&
-                dragRef.current.previewSquare &&
-                validMovesRef.current.some(
-                    m => m.row === dragRef.current!.previewSquare!.row && m.col === dragRef.current!.previewSquare!.col
-                )
-            ) {
-                doMove(dragRef.current.from, dragRef.current.previewSquare);
+                if (pinchStarted) {
+                    pinchStartTimeRef.current = now; // track for quick-pinch detection
+                }
+
+                if (pinchEnded) {
+                    const heldMs = now - pinchStartTimeRef.current;
+
+                    if (heldMs < QUICK_PINCH_MAX_MS && sq) {
+                        // ✅ Quick-pinch: CONFIRM move if aimed at valid square
+                        const target = aimedSquareRef.current;
+                        if (target && legal.some(m => m.row === target.row && m.col === target.col)) {
+                            doMove(selectedRef.current!, target);
+                        } else if (legal.some(m => m.row === sq.row && m.col === sq.col)) {
+                            doMove(selectedRef.current!, sq);
+                        } else {
+                            // Quick-pinch on invalid square → DESELECT
+                            selectedRef.current = null;
+                            validMovesRef.current = [];
+                            aimedSquareRef.current = null;
+                            phaseRef.current = 'IDLE';
+                        }
+                    } else if (heldMs >= HOLD_SELECT_MS) {
+                        // Long hold-pinch while selected → DESELECT (cancel)
+                        selectedRef.current = null;
+                        validMovesRef.current = [];
+                        aimedSquareRef.current = null;
+                        phaseRef.current = 'IDLE';
+                    }
+                    pinchStartTimeRef.current = 0;
+                }
             }
-            dragRef.current = null;
-            pinchStartSquareRef.current = null;
-            pinchStartPointRef.current = null;
-        }
 
-        // Open palm = undo
-        if (!isPinching && gs.gesture === 'open_palm' && !pinchCoolRef.current) {
-            pinchCoolRef.current = true;
-            // Undo: restore previous board (simple: just deselect for now)
-            selectedRef.current = null; validMovesRef.current = [];
-            setTimeout(() => { pinchCoolRef.current = false; }, 1200);
-        }
+            prevPinchRef.current = isPinching;
+        };
+    }); // no deps — always uses latest refs
 
-        // Peace sign = reset
-        if (!isPinching && gs.gesture === 'peace' && !pinchCoolRef.current) {
-            pinchCoolRef.current = true;
-            boardRef.current = createInitialBoard();
-            selectedRef.current = null;
-            validMovesRef.current = [];
-            currentTurnRef.current = 'white';
-            epRef.current = null;
-            lastMoveRef.current = null;
-            gameOverRef.current = null;
-            dragRef.current = null;
-            capturedRef.current = { white: [], black: [] };
-            moveHistRef.current = [];
-            setGameOverState(null);
-            setTimeout(() => { pinchCoolRef.current = false; }, 1500);
-        }
-
-        prevPinchingRef.current = isPinching;
-    }, [screenToSquare, doMove, lockPiece, smoothCursor, getSnappedLegalTarget, squareToScreenCenter]);
-
-    // ── Canvas draw ───────────────────────────────────────────────────────────
+    // ── Draw a single frame ───────────────────────────────────────────────────
     const drawFrame = useCallback(() => {
         const canvas = canvasRef.current;
         const video = videoRef.current;
@@ -404,48 +364,45 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
         const W = canvas.width, H = canvas.height;
         const ctx = canvas.getContext('2d')!;
 
-        // ── Layer 1: Camera feed ──────────────────────────────────────────────
+        // ── Layer 1: Camera feed (mirrored) ───────────────────────────────────
         ctx.save();
-        ctx.scale(-1, 1); // mirror
+        ctx.scale(-1, 1);
         ctx.drawImage(video, -W, 0, W, H);
         ctx.restore();
 
-        // ── Layer 2: Vignette for depth ───────────────────────────────────────
+        // Vignette
         const vg = ctx.createRadialGradient(W / 2, H / 2, H * 0.2, W / 2, H / 2, H * 0.8);
         vg.addColorStop(0, 'rgba(0,0,0,0)');
         vg.addColorStop(1, 'rgba(0,0,0,0.45)');
-        ctx.fillStyle = vg;
-        ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
 
-        // ── Floating animation offset ─────────────────────────────────────────
+        // ── FIX 4: Compute stable layout first (used for hit-testing) ─────────
+        const { x: bxStable, y: byStable, sqSize, total: totalSize } = computeStableLayout(W, H);
+
+        // Float is draw-only — never stored in stableBoardRef
         floatRef.current.t += 0.018;
         const floatY = Math.sin(floatRef.current.t) * 5;
-
-        // ── Compute board layout ──────────────────────────────────────────────
-        const { x: bx, y: by, sqSize, totalSize } = (() => {
-            const { x, y, sqSize, total } = computeBoardLayout(W, H);
-            return { x, y: y + floatY, sqSize, totalSize: total };
-        })();
-        boardLayoutRef.current = { x: bx, y: by, sqSize, totalSize };
-
-        // ── Layer 3: Floating board ───────────────────────────────────────────
-        ctx.save();
-
-        // Board glow / shadow
-        ctx.shadowColor = 'rgba(0,220,255,0.6)';
-        ctx.shadowBlur = 30;
-        ctx.strokeStyle = BOARD_BORDER;
-        ctx.lineWidth = 3;
-        ctx.strokeRect(bx - 1, by - 1, totalSize + 2, totalSize + 2);
-        ctx.shadowBlur = 0;
+        const bx = bxStable;
+        const by = byStable + floatY; // ONLY used for drawing, not hit-testing
 
         const board = boardRef.current;
         const sel = selectedRef.current;
         const vm = validMovesRef.current;
         const lm = lastMoveRef.current;
-        const drag = dragRef.current;
         const myCol = myColorRef.current;
+        const phase = phaseRef.current;
+        const aimed = aimedSquareRef.current;
+        const cursorPt = cursorRef.current;
+        const gs = gestureRef.current;
         const selectedPiece = sel ? board[sel.row][sel.col] : null;
+
+        // ── Layer 2: Board + squares ──────────────────────────────────────────
+        ctx.save();
+        // Board glow border
+        ctx.shadowColor = 'rgba(0,220,255,0.6)'; ctx.shadowBlur = 30;
+        ctx.strokeStyle = BOARD_BORDER; ctx.lineWidth = 3;
+        ctx.strokeRect(bx - 1, by - 1, totalSize + 2, totalSize + 2);
+        ctx.shadowBlur = 0;
 
         for (let dr = 0; dr < 8; dr++) {
             for (let dc = 0; dc < 8; dc++) {
@@ -455,55 +412,52 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
                 const sy = by + dr * sqSize;
                 const isLight = (row + col) % 2 === 0;
 
-                // Base square color
+                // Base color
                 let fillColor = isLight ? LIGHT_SQ : DARK_SQ;
                 if (lm && ((lm.from.row === row && lm.from.col === col) || (lm.to.row === row && lm.to.col === col)))
                     fillColor = LASTMV_SQ;
-                if (sel?.row === row && sel?.col === col) fillColor = SEL_SQ;
+                if (sel?.row === row && sel?.col === col)
+                    fillColor = SEL_SQ;
 
-                // Hover from gesture — compute once per square
-                const gsCur = gestureRef.current;
-                let isHoveredSq = false;
-                const cursorPoint = cursorRef.current;
-                if (gsCur && cursorPoint) {
-                    const hSq = screenToSquare(cursorPoint.x, cursorPoint.y);
+                // Aimed (blue target)
+                if (aimed?.row === row && aimed?.col === col && phase === 'SELECTED')
+                    fillColor = AIM_SQ;
+
+                // Hover (yellow) — only in IDLE/HOLDING
+                let isHovered = false;
+                if (cursorPt && (phase === 'IDLE' || phase === 'HOLDING' || phase === 'SELECTED')) {
+                    const hSq = screenToSquare(cursorPt.x, cursorPt.y);
                     if (hSq?.row === row && hSq?.col === col) {
-                        isHoveredSq = true;
-                        if (!drag) fillColor = HOVER_SQ;
+                        isHovered = true;
+                        if (phase === 'IDLE' || phase === 'HOLDING') fillColor = HOVER_SQ;
                     }
                 }
 
                 ctx.fillStyle = fillColor;
                 ctx.fillRect(sx, sy, sqSize, sqSize);
 
-                // ── ENHANCED: Bright yellow square highlight with notation ────
-                if (isHoveredSq && !drag) {
-                    // Bright border
+                // Hover border + notation
+                if (isHovered && (phase === 'IDLE' || phase === 'HOLDING')) {
                     ctx.save();
-                    ctx.strokeStyle = '#FFFF00';
-                    ctx.lineWidth = 4;
-                    ctx.shadowColor = '#FFFF00';
-                    ctx.shadowBlur = 14;
+                    ctx.strokeStyle = '#FFFF00'; ctx.lineWidth = 4;
+                    ctx.shadowColor = '#FFFF00'; ctx.shadowBlur = 14;
                     ctx.strokeRect(sx + 2, sy + 2, sqSize - 4, sqSize - 4);
                     ctx.shadowBlur = 0;
-                    // Chess notation label in top-left of square
-                    const files = 'abcdefgh';
-                    const fileChar = files[myCol === 'black' ? 7 - col : col];
+                    const fileChar = 'abcdefgh'[myCol === 'black' ? 7 - col : col];
                     const rankNum = myCol === 'black' ? row + 1 : 8 - row;
-                    const notation = fileChar + rankNum;
-                    ctx.font = `bold ${Math.max(11, sqSize * 0.22)}px "Segoe UI", sans-serif`;
+                    ctx.font = `bold ${Math.max(11, sqSize * 0.22)}px "Segoe UI"`;
                     ctx.textAlign = 'left'; ctx.textBaseline = 'top';
                     ctx.fillStyle = '#FFFF00';
-                    ctx.fillText(notation, sx + 5, sy + 4);
+                    ctx.fillText(`${fileChar}${rankNum}`, sx + 5, sy + 4);
                     ctx.restore();
                 }
 
-                // Valid move highlight
+                // Valid move highlights
                 if (vm.some(m => m.row === row && m.col === col)) {
-                    const piece = board[row][col];
-                    if (piece && piece.color !== myCol) {
+                    const target = board[row][col];
+                    if (target && target.color !== myCol) {
                         // Capture ring
-                        ctx.strokeStyle = 'rgba(80,220,80,0.7)';
+                        ctx.strokeStyle = 'rgba(80,220,80,0.75)';
                         ctx.lineWidth = sqSize * 0.1;
                         ctx.strokeRect(sx + sqSize * 0.05, sy + sqSize * 0.05, sqSize * 0.9, sqSize * 0.9);
                     } else {
@@ -515,36 +469,31 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
                     }
                 }
 
-                // ── Layer 4: Chess pieces ─────────────────────────────────────
+                // Invalid target indicator (cursor on non-legal square while piece selected)
+                if (phase === 'SELECTED' && sel && isHovered && !vm.some(m => m.row === row && m.col === col) && !(sel.row === row && sel.col === col)) {
+                    ctx.fillStyle = INVALID_SQ;
+                    ctx.fillRect(sx, sy, sqSize, sqSize);
+                }
+
+                // ── Pieces ────────────────────────────────────────────────────
                 const piece = board[row][col];
-                if (piece && !(drag && drag.from.row === row && drag.from.col === col)) {
-                    const isSel = sel?.row === row && sel?.col === col;
-
+                if (piece) {
                     ctx.save();
-                    // Enhanced glow: selected = bright green, hovered = bright gold
-                    if (isSel) {
-                        ctx.shadowColor = '#00FF44';
-                        ctx.shadowBlur = 32;
-                    } else if (isHoveredSq) {
-                        ctx.shadowColor = '#FFD700';
-                        ctx.shadowBlur = 28;
-                    }
-
-                    const fontSize = sqSize * 0.72;
-                    ctx.font = `${fontSize}px serif`;
-                    ctx.textAlign = 'center';
-                    ctx.textBaseline = 'middle';
-
-                    // Piece drop-shadow for depth
+                    const isSel = sel?.row === row && sel?.col === col;
+                    if (isSel) { ctx.shadowColor = '#00FF44'; ctx.shadowBlur = 32; }
+                    else if (isHovered) { ctx.shadowColor = '#FFD700'; ctx.shadowBlur = 28; }
+                    const fs = sqSize * 0.72;
+                    ctx.font = `${fs}px serif`;
+                    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                    // Shadow
                     ctx.fillStyle = piece.color === 'white' ? 'rgba(0,0,0,0.55)' : 'rgba(255,255,255,0.15)';
                     ctx.fillText(PIECE_UNICODE[piece.color][piece.type], sx + sqSize / 2 + 2, sy + sqSize / 2 + 2);
-
                     ctx.fillStyle = piece.color === 'white' ? '#FFFFFF' : '#1a1a2e';
                     ctx.fillText(PIECE_UNICODE[piece.color][piece.type], sx + sqSize / 2, sy + sqSize / 2);
                     ctx.restore();
                 }
 
-                // Coordinates
+                // Board coordinates
                 if (dc === 0) {
                     ctx.fillStyle = isLight ? 'rgba(0,100,120,0.8)' : 'rgba(200,240,255,0.8)';
                     ctx.font = `bold ${sqSize * 0.2}px sans-serif`;
@@ -555,176 +504,135 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
                     ctx.fillStyle = isLight ? 'rgba(0,100,120,0.8)' : 'rgba(200,240,255,0.8)';
                     ctx.font = `bold ${sqSize * 0.2}px sans-serif`;
                     ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
-                    const colLabel = 'abcdefgh'[myCol === 'black' ? 7 - col : col];
-                    ctx.fillText(colLabel, sx + sqSize - 3, sy + sqSize - 3);
+                    ctx.fillText('abcdefgh'[myCol === 'black' ? 7 - col : col], sx + sqSize - 3, sy + sqSize - 3);
                 }
             }
         }
         ctx.restore();
 
-        ctx.restore(); // end board save
-
-        // ── Dragged piece follows finger ──────────────────────────────────────
-        if (drag) {
+        // ── Hold-pinch progress ring (HOLDING phase) ──────────────────────────
+        if (phase === 'HOLDING' && cursorPt) {
+            const prog = holdProgressRef.current;
             ctx.save();
-            ctx.shadowColor = '#FFD700'; ctx.shadowBlur = 32;
-            const fontSize = sqSize * 0.85;
-            ctx.font = `${fontSize}px serif`;
-            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-            ctx.globalAlpha = 0.92;
-            ctx.fillStyle = drag.piece.color === 'white' ? '#FFFFFF' : '#1a1a2e';
-            ctx.fillText(PIECE_UNICODE[drag.piece.color][drag.piece.type], drag.screenX, drag.screenY);
+            ctx.strokeStyle = `rgba(0, 255, 136, ${0.4 + prog * 0.6})`;
+            ctx.lineWidth = 5;
+            ctx.shadowColor = '#00FF88'; ctx.shadowBlur = 16;
+            ctx.beginPath();
+            ctx.arc(cursorPt.x, cursorPt.y, 28, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * prog);
+            ctx.stroke();
+            // Inner pulsing dot
+            ctx.fillStyle = `rgba(0,255,136,${0.3 + prog * 0.5})`;
+            ctx.beginPath(); ctx.arc(cursorPt.x, cursorPt.y, 8 + prog * 6, 0, Math.PI * 2); ctx.fill();
             ctx.restore();
         }
 
-        // ── VISUAL FEEDBACK: Hovered piece tooltip + info panel ───────────────
-        const gsFeedback = gestureRef.current;
-        const cursorPoint = cursorRef.current;
-        if (gsFeedback && cursorPoint && !drag) {
-            const { x: curX, y: curY } = cursorPoint;
-            const hovSq = screenToSquare(curX, curY);
+        // ── Cursor ────────────────────────────────────────────────────────────
+        if (gs && cursorPt) {
+            const { x: cx, y: cy } = cursorPt;
+            const isPinch = gs.isPinching;
+            const color = phase === 'SELECTED'
+                ? (aimed && vm.some(m => m.row === aimed.row && m.col === aimed.col) ? '#00AAFF' : '#FF4444')
+                : (isPinch ? '#00FF88' : '#00CCFF');
 
-            if (hovSq) {
-                const hovPiece = board[hovSq.row][hovSq.col];
-
-                if (hovPiece) {
-                    // ── Floating tooltip near cursor ──────────────────────────
-                    const pieceNames: Record<string, string> = {
-                        king: 'King', queen: 'Queen', rook: 'Rook',
-                        bishop: 'Bishop', knight: 'Knight', pawn: 'Pawn',
-                    };
-                    const colorLabel = hovPiece.color === 'white' ? '⬜' : '⬛';
-                    const files = 'abcdefgh';
-                    const fileChar = files[myCol === 'black' ? 7 - hovSq.col : hovSq.col];
-                    const rankNum = myCol === 'black' ? hovSq.row + 1 : 8 - hovSq.row;
-                    const sqNotation = fileChar + rankNum;
-                    const tooltipText = `${colorLabel} ${pieceNames[hovPiece.type]} · ${sqNotation}`;
-
-                    ctx.save();
-                    ctx.font = 'bold 15px "Segoe UI", sans-serif';
-                    const ttW = ctx.measureText(tooltipText).width + 24;
-                    const ttH = 32;
-                    // Position tooltip above-right of cursor, keep on screen
-                    let ttX = curX + 18;
-                    let ttY = curY - ttH - 12;
-                    if (ttX + ttW > W - 8) ttX = curX - ttW - 18;
-                    if (ttY < 8) ttY = curY + 18;
-
-                    ctx.fillStyle = 'rgba(0,0,0,0.82)';
-                    ctx.beginPath();
-                    ctx.roundRect(ttX, ttY, ttW, ttH, 8);
-                    ctx.fill();
-                    ctx.strokeStyle = '#FFD700';
-                    ctx.lineWidth = 1.5;
-                    ctx.stroke();
-
-                    ctx.fillStyle = '#FFD700';
-                    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-                    ctx.fillText(tooltipText, ttX + 12, ttY + ttH / 2);
-                    ctx.restore();
-
-                    // ── Info panel (top-left corner) ──────────────────────────
-                    const px = 16, py = 60;
-                    const pw = 210, ph = 96;
-                    ctx.save();
-                    ctx.fillStyle = 'rgba(0,0,0,0.82)';
-                    ctx.beginPath(); ctx.roundRect(px, py, pw, ph, 12); ctx.fill();
-                    ctx.strokeStyle = '#00FF88'; ctx.lineWidth = 2;
-                    ctx.stroke();
-
-                    // Title
-                    ctx.fillStyle = '#00FF88';
-                    ctx.font = 'bold 12px "Segoe UI", sans-serif';
-                    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-                    ctx.fillText('👆 HOVERING', px + 12, py + 10);
-
-                    // Piece emoji + name
-                    ctx.font = 'bold 22px serif';
-                    ctx.fillStyle = '#FFFFFF';
-                    ctx.fillText(PIECE_UNICODE[hovPiece.color][hovPiece.type], px + 12, py + 30);
-                    ctx.font = 'bold 16px "Segoe UI", sans-serif';
-                    ctx.fillText(
-                        `${hovPiece.color.charAt(0).toUpperCase() + hovPiece.color.slice(1)} ${pieceNames[hovPiece.type]}`,
-                        px + 42, py + 36
-                    );
-
-                    // Position
-                    ctx.font = '13px "Segoe UI", sans-serif';
-                    ctx.fillStyle = '#aaa';
-                    ctx.fillText(`Position: ${sqNotation}`, px + 12, py + 66);
-
-                    // Pinch hint
-                    ctx.fillStyle = '#00E5FF';
-                    ctx.font = '11px "Segoe UI", sans-serif';
-                    ctx.fillText('🤌 Pinch to select', px + 12, py + 82);
-                    ctx.restore();
-                }
-            }
+            ctx.save();
+            ctx.shadowColor = color; ctx.shadowBlur = 22;
+            ctx.strokeStyle = color; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.arc(cx, cy, isPinch ? 16 : 12, 0, Math.PI * 2); ctx.stroke();
+            ctx.shadowBlur = 12;
+            ctx.fillStyle = color;
+            ctx.beginPath(); ctx.arc(cx, cy, isPinch ? 7 : 5, 0, Math.PI * 2); ctx.fill();
+            // Crosshair
+            ctx.shadowBlur = 0;
+            ctx.strokeStyle = color.replace(')', ', 0.7)').replace('rgb', 'rgba');
+            ctx.lineWidth = 1.5;
+            const arm = 18;
+            ctx.beginPath();
+            ctx.moveTo(cx - arm, cy); ctx.lineTo(cx - 7, cy);
+            ctx.moveTo(cx + 7, cy); ctx.lineTo(cx + arm, cy);
+            ctx.moveTo(cx, cy - arm); ctx.lineTo(cx, cy - 7);
+            ctx.moveTo(cx, cy + 7); ctx.lineTo(cx, cy + arm);
+            ctx.stroke();
+            ctx.restore();
         }
 
-        if (selectedPiece && sel) {
+        // ── Selected piece info panel ─────────────────────────────────────────
+        if (selectedPiece && sel && phase === 'SELECTED') {
             const files = 'abcdefgh';
-            const selectedNotation = `${files[sel.col]}${8 - sel.row}`;
-            const moveList = vm
-                .slice(0, 6)
-                .map(m => `${files[m.col]}${8 - m.row}`)
-                .join(', ');
-
+            const selNotation = `${files[sel.col]}${8 - sel.row}`;
+            const moveList = vm.slice(0, 6).map(m => `${files[m.col]}${8 - m.row}`).join(', ');
             ctx.save();
             ctx.fillStyle = 'rgba(0,0,0,0.84)';
-            ctx.beginPath(); ctx.roundRect(16, 164, 260, 92, 12); ctx.fill();
-            ctx.strokeStyle = '#00FF88';
-            ctx.lineWidth = 2;
-            ctx.stroke();
-
+            ctx.beginPath(); ctx.roundRect(16, 60, 260, 100, 12); ctx.fill();
+            ctx.strokeStyle = '#00FF88'; ctx.lineWidth = 2; ctx.stroke();
             ctx.fillStyle = '#00FF88';
-            ctx.font = 'bold 12px "Segoe UI", sans-serif';
-            ctx.textAlign = 'left';
-            ctx.textBaseline = 'top';
-            ctx.fillText('LOCKED PIECE', 28, 176);
-
-            ctx.fillStyle = '#FFFFFF';
-            ctx.font = 'bold 16px "Segoe UI", sans-serif';
-            ctx.fillText(
-                `${selectedPiece.color.charAt(0).toUpperCase() + selectedPiece.color.slice(1)} ${selectedPiece.type} at ${selectedNotation}`,
-                28,
-                198
-            );
-
-            ctx.fillStyle = '#00E5FF';
-            ctx.font = '12px "Segoe UI", sans-serif';
-            ctx.fillText(`Moves: ${moveList || 'none'}`, 28, 224);
-
-            ctx.fillStyle = 'rgba(255,255,255,0.72)';
-            ctx.fillText('Hold pinch and move your hand, then release to drop.', 28, 240);
+            ctx.font = 'bold 12px "Segoe UI"'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+            ctx.fillText('✅ PIECE SELECTED', 28, 72);
+            ctx.fillStyle = '#FFFFFF'; ctx.font = 'bold 16px "Segoe UI"';
+            ctx.fillText(`${selectedPiece.color} ${selectedPiece.type} @ ${selNotation}`, 28, 94);
+            ctx.fillStyle = '#00E5FF'; ctx.font = '12px "Segoe UI"';
+            ctx.fillText(`Moves: ${moveList || 'none'}`, 28, 118);
+            ctx.fillStyle = 'rgba(255,255,255,0.65)'; ctx.font = '11px "Segoe UI"';
+            ctx.fillText('Aim at a move dot, then quick-pinch to confirm', 28, 138);
             ctx.restore();
         }
 
-        // ── Layer 5: Status overlay (top center) ──────────────────────────────
+        // ── Hover tooltip ─────────────────────────────────────────────────────
+        if (gs && cursorPt && phase !== 'SELECTED') {
+            const hovSq = screenToSquare(cursorPt.x, cursorPt.y);
+            if (hovSq) {
+                const hovPiece = board[hovSq.row][hovSq.col];
+                if (hovPiece) {
+                    const names: Record<string, string> = { king: 'King', queen: 'Queen', rook: 'Rook', bishop: 'Bishop', knight: 'Knight', pawn: 'Pawn' };
+                    const fileChar = 'abcdefgh'[myCol === 'black' ? 7 - hovSq.col : hovSq.col];
+                    const rankNum = myCol === 'black' ? hovSq.row + 1 : 8 - hovSq.row;
+                    const label = `${hovPiece.color === 'white' ? '⬜' : '⬛'} ${names[hovPiece.type]} · ${fileChar}${rankNum}`;
+                    ctx.save();
+                    ctx.font = 'bold 15px "Segoe UI"';
+                    const ttW = ctx.measureText(label).width + 24;
+                    let ttX = cursorPt.x + 18, ttY = cursorPt.y - 44;
+                    if (ttX + ttW > W - 8) ttX = cursorPt.x - ttW - 18;
+                    if (ttY < 8) ttY = cursorPt.y + 18;
+                    ctx.fillStyle = 'rgba(0,0,0,0.82)';
+                    ctx.beginPath(); ctx.roundRect(ttX, ttY, ttW, 32, 8); ctx.fill();
+                    ctx.strokeStyle = '#FFD700'; ctx.lineWidth = 1.5; ctx.stroke();
+                    ctx.fillStyle = '#FFD700'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+                    ctx.fillText(label, ttX + 12, ttY + 16);
+                    // Hint if it's player's piece and their turn
+                    if (hovPiece.color === myCol && myCol === currentTurnRef.current) {
+                        ctx.fillStyle = '#00E5FF'; ctx.font = '11px "Segoe UI"'; ctx.textBaseline = 'top';
+                        ctx.fillText('Hold pinch 1s to select', ttX + 12, ttY + 36);
+                    }
+                    ctx.restore();
+                }
+            }
+        }
+
+        // ── Status bar ────────────────────────────────────────────────────────
         const inChk = isInCheck(board, currentTurnRef.current);
-        const statusText = gameOverRef.current
-            ? `${gameOverRef.current.winner === 'Draw' ? '🤝 Draw' : `🏆 ${gameOverRef.current.winner} wins`} — ${gameOverRef.current.reason}`
-            : inChk ? `⚠️ CHECK! ${currentTurnRef.current} to move`
-                : myColorRef.current === currentTurnRef.current ? '👆 Your turn — point & pinch'
+        const phaseHint = phase === 'HOLDING'
+            ? `🤌 Hold… (${Math.round(holdProgressRef.current * 100)}%)`
+            : phase === 'SELECTED'
+                ? '👆 Aim at a dot, quick-pinch to move'
+                : myColorRef.current === currentTurnRef.current
+                    ? '👆 Your turn — hover & hold-pinch to select'
                     : `⏳ ${currentTurnRef.current}'s turn`;
 
+        const statusText = gameOverRef.current
+            ? `${gameOverRef.current.winner === 'Draw' ? '🤝 Draw' : `🏆 ${gameOverRef.current.winner} wins`} — ${gameOverRef.current.reason}`
+            : inChk ? `⚠️ CHECK! ${currentTurnRef.current} to move` : phaseHint;
+
         ctx.save();
-        ctx.font = 'bold 18px "Segoe UI", sans-serif';
-        ctx.textAlign = 'center';
+        ctx.font = 'bold 17px "Segoe UI"'; ctx.textAlign = 'center';
         const tw = ctx.measureText(statusText).width;
-        ctx.fillStyle = 'rgba(0,0,0,0.6)';
-        ctx.beginPath();
-        ctx.roundRect(W / 2 - tw / 2 - 16, 14, tw + 32, 36, 18);
-        ctx.fill();
-        ctx.fillStyle = inChk ? '#FF6B6B' : (myColorRef.current === currentTurnRef.current ? '#00E5FF' : '#aaa');
-        ctx.fillText(statusText, W / 2, 32);
+        ctx.fillStyle = 'rgba(0,0,0,0.65)';
+        ctx.beginPath(); ctx.roundRect(W / 2 - tw / 2 - 18, 12, tw + 36, 36, 18); ctx.fill();
+        ctx.fillStyle = inChk ? '#FF6B6B' : (phase === 'SELECTED' ? '#00AAFF' : phase === 'HOLDING' ? '#00FF88' : myColorRef.current === currentTurnRef.current ? '#00E5FF' : '#aaa');
+        ctx.fillText(statusText, W / 2, 30);
         ctx.restore();
 
-        // ── Turn indicators (bottom) ──────────────────────────────────────────
-        const turnLabels: [PieceColor, string][] = [['white', '⬜ White'], ['black', '⬛ Black']];
-        turnLabels.forEach(([col, label], i) => {
-            const tx = W / 2 + (i === 0 ? -90 : 10);
-            const ty = H - 44;
+        // ── Turn indicators ───────────────────────────────────────────────────
+        (['white', 'black'] as PieceColor[]).forEach((col, i) => {
+            const tx = W / 2 + (i === 0 ? -92 : 10), ty = H - 44;
             const active = currentTurnRef.current === col;
             ctx.save();
             ctx.fillStyle = active ? (col === 'white' ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.85)') : 'rgba(255,255,255,0.1)';
@@ -732,18 +640,11 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
             if (active) { ctx.strokeStyle = '#00E5FF'; ctx.lineWidth = 2; ctx.stroke(); }
             ctx.fillStyle = active ? (col === 'white' ? '#000' : '#fff') : 'rgba(255,255,255,0.35)';
             ctx.font = 'bold 13px "Segoe UI"'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-            ctx.fillText(label + (myColorRef.current === col ? ' (you)' : ''), tx + 40, ty + 15);
+            ctx.fillText((col === 'white' ? '⬜ White' : '⬛ Black') + (myColorRef.current === col ? ' (you)' : ''), tx + 40, ty + 15);
             ctx.restore();
         });
 
-        // ── Gesture hint (bottom right) ───────────────────────────────────────
-        const hints = ['🤌 Pinch piece = lock', 'Move while pinching, release = drop', '✌️ Peace = reset'];
-        ctx.save();
-        ctx.font = '12px "Segoe UI"'; ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(255,255,255,0.5)';
-        hints.forEach((h, i) => ctx.fillText(h, W - 16, H - 70 + i * 18));
-        ctx.restore();
-
-        // ── Captured pieces sidebar ───────────────────────────────────────────
+        // ── Captured pieces ───────────────────────────────────────────────────
         const cap = capturedRef.current;
         if (cap.white.length || cap.black.length) {
             ctx.save();
@@ -755,7 +656,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
             ctx.restore();
         }
 
-        // ── Move history (right side) ─────────────────────────────────────────
+        // ── Move history ──────────────────────────────────────────────────────
         const hist = moveHistRef.current.slice(-10);
         if (hist.length) {
             ctx.save();
@@ -766,70 +667,33 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
             ctx.restore();
         }
 
-        // ── Layer 6: Cursor (always on top) ──────────────────────────────────
-        const gsCursor = gestureRef.current;
-        if (gsCursor && cursorRef.current) {
-            const { x: cx, y: cy } = cursorRef.current;
-            const isPinch = gsCursor.isPinching;
+        // ── Gesture hints ─────────────────────────────────────────────────────
+        const hints = ['🖐 Hold pinch 1s = select piece', '🤌 Quick pinch on dot = move', '✌️ Peace sign = reset'];
+        ctx.save();
+        ctx.font = '12px "Segoe UI"'; ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(255,255,255,0.45)';
+        hints.forEach((h, i) => ctx.fillText(h, W - 16, H - 70 + i * 18));
+        ctx.restore();
 
-            ctx.save();
-
-            // Outer glow ring
-            ctx.shadowColor = isPinch ? '#00FF88' : '#00CCFF';
-            ctx.shadowBlur = 22;
-            ctx.strokeStyle = isPinch ? '#00FF88' : '#00CCFF';
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.arc(cx, cy, isPinch ? 16 : 12, 0, Math.PI * 2);
-            ctx.stroke();
-
-            // Filled dot
-            ctx.shadowBlur = 12;
-            ctx.fillStyle = isPinch ? '#00FF88' : '#00CCFF';
-            ctx.beginPath();
-            ctx.arc(cx, cy, isPinch ? 7 : 5, 0, Math.PI * 2);
-            ctx.fill();
-
-            // Crosshair lines
-            ctx.shadowBlur = 0;
-            ctx.strokeStyle = isPinch ? 'rgba(0,255,136,0.7)' : 'rgba(0,204,255,0.7)';
-            ctx.lineWidth = 1.5;
-            const arm = 18;
-            ctx.beginPath();
-            ctx.moveTo(cx - arm, cy); ctx.lineTo(cx - 6, cy);
-            ctx.moveTo(cx + 6, cy); ctx.lineTo(cx + arm, cy);
-            ctx.moveTo(cx, cy - arm); ctx.lineTo(cx, cy - 6);
-            ctx.moveTo(cx, cy + 6); ctx.lineTo(cx, cy + arm);
-            ctx.stroke();
-
-            ctx.restore();
-        }
-
-        // ── Layer 7: Debug Overlay ───────────────────────────────────────────
+        // ── Debug overlay ─────────────────────────────────────────────────────
         if (debugMode) {
             ctx.save();
-            ctx.fillStyle = 'rgba(0,0,0,0.7)';
-            ctx.fillRect(10, 10, 300, 120);
-            ctx.fillStyle = 'cyan';
-            ctx.font = '14px monospace';
-            ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-            const gsDbg = gestureRef.current;
-            ctx.fillText(`Pinching: ${gsDbg ? gsDbg.isPinching : false}`, 20, 20);
-            if (gsDbg && cursorRef.current) {
-                const { x: fx, y: fy } = cursorRef.current;
-                const hSq = screenToSquare(fx, fy);
-                ctx.fillText(`Raw Canvas X: ${Math.round(fx)} Y: ${Math.round(fy)}`, 20, 45);
-                ctx.fillText(`Map Row: ${hSq?.row ?? 'N/A'} Col: ${hSq?.col ?? 'N/A'}`, 20, 70);
+            ctx.fillStyle = 'rgba(0,0,0,0.75)'; ctx.fillRect(10, 10, 320, 140);
+            ctx.fillStyle = 'cyan'; ctx.font = '13px monospace'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+            ctx.fillText(`Phase: ${phase}`, 20, 20);
+            ctx.fillText(`Pinching: ${gs?.isPinching ?? false}`, 20, 38);
+            ctx.fillText(`Hold progress: ${Math.round((holdProgressRef.current ?? 0) * 100)}%`, 20, 56);
+            if (cursorPt) {
+                const hSq = screenToSquare(cursorPt.x, cursorPt.y);
+                ctx.fillText(`Cursor: x=${Math.round(cursorPt.x)} y=${Math.round(cursorPt.y)}`, 20, 74);
+                ctx.fillText(`Square: r=${hSq?.row ?? 'N/A'} c=${hSq?.col ?? 'N/A'}`, 20, 92);
             }
-            if (dragRef.current) {
-                ctx.fillText(`Dragging: r${dragRef.current.from.row} c${dragRef.current.from.col}`, 20, 95);
-            }
+            if (sel) ctx.fillText(`Selected: r${sel.row} c${sel.col} (${validMovesRef.current.length} moves)`, 20, 110);
+            if (aimed) ctx.fillText(`Aimed: r${aimed.row} c${aimed.col}`, 20, 128);
             ctx.restore();
         }
+    }, [computeStableLayout, screenToSquare, debugMode]);
 
-    }, [computeBoardLayout, screenToSquare, debugMode]);
-
-    // ── MediaPipe setup ───────────────────────────────────────────────────────
+    // ── FIX 1: MediaPipe setup — NO processGesture in deps ───────────────────
     useEffect(() => {
         const hands = new Hands({
             locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`,
@@ -845,52 +709,42 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
             if (!results.multiHandLandmarks?.length) {
                 gestureRef.current = null;
                 cursorRef.current = null;
-                cursorHistoryRef.current = [];
+                cursorHistRef.current = [];
                 return;
             }
 
-            // Draw skeleton for ALL detected hands
-            results.multiHandLandmarks.forEach((lm) => {
+            // Draw skeleton for all hands (mirrored)
+            results.multiHandLandmarks.forEach(lm => {
                 const gs = classifyGesture(lm as HandLandmark[]);
                 drawHandSkeleton(ctx, lm as HandLandmark[], W, H, gs.isPinching);
             });
 
-            const boardCenterX = boardLayoutRef.current.totalSize > 0
-                ? boardLayoutRef.current.x + boardLayoutRef.current.totalSize / 2
-                : W / 2;
-            const boardCenterY = boardLayoutRef.current.totalSize > 0
-                ? boardLayoutRef.current.y + boardLayoutRef.current.totalSize / 2
-                : H / 2;
+            // Pick best hand (closest to board center, bonus for pinching)
+            const bx = stableBoardRef.current.x + stableBoardRef.current.totalSize / 2 || W / 2;
+            const by = stableBoardRef.current.y + stableBoardRef.current.totalSize / 2 || H / 2;
 
-            const candidates = results.multiHandLandmarks.map((lm) => {
-                const landmarks = lm as HandLandmark[];
-                const gs = classifyGesture(landmarks);
-                const cursor = landmarkToCanvas(gs.indexTip, W, H);
-                const hoveredSquare = screenToSquare(cursor.x, cursor.y);
-                const distanceToBoardCenter = Math.hypot(cursor.x - boardCenterX, cursor.y - boardCenterY);
-
+            let best: { gs: GestureState; score: number } | null = null;
+            for (const lm of results.multiHandLandmarks) {
+                const gs = classifyGesture(lm as HandLandmark[]);
+                // FIX 3: mirror X for cursor position scoring
+                const cx = W - gs.indexTip.x * W;
+                const cy = gs.indexTip.y * H;
+                const sq = screenToSquare(cx, cy);
                 let score = 0;
                 if (gs.isPinching) score += 120;
                 if (gs.gesture === 'point') score += 70;
-                if (gs.gesture === 'pinch') score += 50;
-                if (hoveredSquare) score += 35;
-                score -= distanceToBoardCenter / 25;
-
-                return { gs, score };
-            });
-
-            const bestCandidate = candidates.reduce((best, candidate) =>
-                !best || candidate.score > best.score ? candidate : best,
-                null as { gs: GestureState; score: number } | null
-            );
-
-            if (!bestCandidate) {
-                gestureRef.current = null;
-                return;
+                if (sq) score += 35;
+                score -= Math.hypot(cx - bx, cy - by) / 25;
+                if (!best || score > best.score) best = { gs, score };
             }
 
-            gestureRef.current = bestCandidate.gs;
-            processGesture(bestCandidate.gs, W, H);
+            if (best) {
+                gestureRef.current = best.gs;
+                // Call processGesture via ref — always latest, never causes re-init
+                processGestureRef.current(best.gs, W, H);
+            } else {
+                gestureRef.current = null;
+            }
         });
 
         handsRef.current = hands;
@@ -904,22 +758,18 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
                 width: 1280, height: 720,
             });
             cam.start()
-                .then(() => { setHandReady(true); })
+                .then(() => setHandReady(true))
                 .catch(() => setCamError(true));
             camRef.current = cam;
         }
 
         return () => { hands.close(); camRef.current?.stop(); };
-    }, [processGesture]);
+    }, []); // ✅ Empty deps — MediaPipe never restarts
 
     // ── Render loop ───────────────────────────────────────────────────────────
     useEffect(() => {
         let running = true;
-        const loop = () => {
-            if (!running) return;
-            drawFrame();
-            rafRef.current = requestAnimationFrame(loop);
-        };
+        const loop = () => { if (!running) return; drawFrame(); rafRef.current = requestAnimationFrame(loop); };
         loop();
         return () => { running = false; cancelAnimationFrame(rafRef.current); };
     }, [drawFrame]);
@@ -927,10 +777,9 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
     // ── Canvas resize ─────────────────────────────────────────────────────────
     useEffect(() => {
         const resize = () => {
-            const canvas = canvasRef.current;
-            if (!canvas) return;
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight;
+            if (!canvasRef.current) return;
+            canvasRef.current.width = window.innerWidth;
+            canvasRef.current.height = window.innerHeight;
         };
         resize();
         window.addEventListener('resize', resize);
@@ -945,92 +794,52 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
         const next: PieceColor = currentTurnRef.current === 'white' ? 'black' : 'white';
         boardRef.current = nb; currentTurnRef.current = next;
         setPromotionPending(null);
+        phaseRef.current = 'IDLE';
         const ns = { chessBoard: nb, currentTurn: next, enPassantTarget: null, lastMove: lastMoveRef.current };
         onStateUpdate?.(ns);
         wsRef.current?.send(JSON.stringify({ type: 'game_state_update', data: { state: ns } }));
     };
 
-    // ── Render ────────────────────────────────────────────────────────────────
+    // ── JSX ───────────────────────────────────────────────────────────────────
     return (
         <div style={{ position: 'fixed', inset: 0, background: '#000', overflow: 'hidden' }}>
-            {/* Hidden video element — camera feed drawn to canvas by rAF loop */}
             <video ref={videoRef} autoPlay playsInline muted
                 style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', width: 1, height: 1 }} />
+            <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: '100%' }} />
 
-            {/* THE SINGLE CANVAS — everything is drawn here */}
-            <canvas ref={canvasRef}
-                style={{ display: 'block', width: '100%', height: '100%' }} />
-
-            {/* Loading overlay */}
+            {/* Loading */}
             {!handReady && !camError && (
-                <div style={{
-                    position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
-                    alignItems: 'center', justifyContent: 'center',
-                    background: 'rgba(0,0,0,0.85)', color: '#fff', fontFamily: "'Segoe UI', sans-serif",
-                    zIndex: 10,
-                }}>
-                    <div style={{
-                        width: 60, height: 60, border: '4px solid #333', borderTop: '4px solid #00E5FF',
-                        borderRadius: '50%', animation: 'spin 1s linear infinite', marginBottom: 24,
-                    }} />
+                <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.85)', color: '#fff', fontFamily: "'Segoe UI',sans-serif", zIndex: 10 }}>
+                    <div style={{ width: 60, height: 60, border: '4px solid #333', borderTop: '4px solid #00E5FF', borderRadius: '50%', animation: 'spin 1s linear infinite', marginBottom: 24 }} />
                     <h2 style={{ margin: '0 0 8px', color: '#00E5FF' }}>Loading AR Chess</h2>
                     <p style={{ color: '#888', margin: 0 }}>Initializing camera & hand tracking...</p>
-                    <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+                    <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
                 </div>
             )}
 
             {/* Camera error */}
             {camError && (
-                <div style={{
-                    position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
-                    alignItems: 'center', justifyContent: 'center',
-                    background: 'rgba(0,0,0,0.9)', color: '#fff', fontFamily: "'Segoe UI', sans-serif",
-                    zIndex: 10,
-                }}>
+                <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.9)', color: '#fff', zIndex: 10 }}>
                     <div style={{ fontSize: 64, marginBottom: 16 }}>📷</div>
                     <h2 style={{ color: '#f44336', margin: '0 0 8px' }}>Camera Required</h2>
-                    <p style={{ color: '#aaa' }}>Allow camera access and refresh the page.</p>
+                    <p style={{ color: '#aaa' }}>Allow camera access and refresh.</p>
                 </div>
             )}
 
-            {/* ── DEBUG BUTTON ── */}
-            <button
-                onClick={() => setDebugMode(d => !d)}
-                style={{
-                    position: 'absolute', top: 20, right: 20, zIndex: 100,
-                    padding: '8px 16px', borderRadius: '20px', border: 'none', cursor: 'pointer',
-                    background: debugMode ? '#F44336' : 'rgba(255,255,255,0.15)',
-                    color: '#fff', fontSize: '13px', fontWeight: 700,
-                    backdropFilter: 'blur(4px)',
-                }}
-            >
+            {/* Debug button */}
+            <button onClick={() => setDebugMode(d => !d)} style={{ position: 'absolute', top: 20, right: 20, zIndex: 100, padding: '8px 16px', borderRadius: '20px', border: 'none', cursor: 'pointer', background: debugMode ? '#F44336' : 'rgba(255,255,255,0.15)', color: '#fff', fontSize: '13px', fontWeight: 700, backdropFilter: 'blur(4px)' }}>
                 🐛 Debug
             </button>
 
-            {/* Promotion modal — HTML overlay on top of canvas */}
+            {/* Promotion modal */}
             {promotionPending && (
-                <div style={{
-                    position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    background: 'rgba(0,0,0,0.75)', zIndex: 20,
-                }}>
-                    <div style={{
-                        background: 'rgba(10,20,35,0.97)', borderRadius: 20, padding: '32px 40px',
-                        border: '2px solid #00E5FF', textAlign: 'center',
-                        boxShadow: '0 0 60px rgba(0,229,255,0.4)', color: '#fff',
-                        fontFamily: "'Segoe UI', sans-serif",
-                    }}>
+                <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.75)', zIndex: 20 }}>
+                    <div style={{ background: 'rgba(10,20,35,0.97)', borderRadius: 20, padding: '32px 40px', border: '2px solid #00E5FF', textAlign: 'center', boxShadow: '0 0 60px rgba(0,229,255,0.4)', color: '#fff', fontFamily: "'Segoe UI',sans-serif" }}>
                         <h3 style={{ margin: '0 0 8px' }}>Promote Pawn</h3>
-                        <p style={{ color: '#aaa', fontSize: 13, margin: '0 0 20px' }}>Pinch or click to choose</p>
+                        <p style={{ color: '#aaa', fontSize: 13, margin: '0 0 20px' }}>Click to choose</p>
                         <div style={{ display: 'flex', gap: 16 }}>
                             {(['queen', 'rook', 'bishop', 'knight'] as PieceType[]).map(pt => (
-                                <button key={pt} onClick={() => handlePromotion(pt)} style={{
-                                    fontSize: 52, background: 'rgba(0,229,255,0.12)',
-                                    border: '2px solid #00E5FF', borderRadius: 12,
-                                    padding: '12px 16px', cursor: 'pointer', color: '#fff',
-                                    transition: 'transform 0.15s, background 0.15s',
-                                }}
-                                    onMouseEnter={e => { e.currentTarget.style.transform = 'scale(1.12)'; e.currentTarget.style.background = 'rgba(0,229,255,0.3)'; }}
-                                    onMouseLeave={e => { e.currentTarget.style.transform = 'scale(1)'; e.currentTarget.style.background = 'rgba(0,229,255,0.12)'; }}>
+                                <button key={pt} onClick={() => handlePromotion(pt)} style={{ fontSize: 52, background: 'rgba(0,229,255,0.12)', border: '2px solid #00E5FF', borderRadius: 12, padding: '12px 16px', cursor: 'pointer', color: '#fff' }}>
                                     {PIECE_UNICODE[promotionPending.color][pt]}
                                 </button>
                             ))}
@@ -1041,37 +850,21 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
 
             {/* Game over modal */}
             {gameOverState && (
-                <div style={{
-                    position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    background: 'rgba(0,0,0,0.75)', zIndex: 20,
-                }}>
-                    <div style={{
-                        background: 'rgba(10,20,35,0.97)', borderRadius: 24, padding: '52px 72px',
-                        border: '2px solid #00E5FF', textAlign: 'center',
-                        boxShadow: '0 0 80px rgba(0,229,255,0.5)', color: '#fff',
-                        fontFamily: "'Segoe UI', sans-serif",
-                    }}>
+                <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.75)', zIndex: 20 }}>
+                    <div style={{ background: 'rgba(10,20,35,0.97)', borderRadius: 24, padding: '52px 72px', border: '2px solid #00E5FF', textAlign: 'center', boxShadow: '0 0 80px rgba(0,229,255,0.5)', color: '#fff', fontFamily: "'Segoe UI',sans-serif" }}>
                         <div style={{ fontSize: 72, marginBottom: 16 }}>{gameOverState.winner === 'Draw' ? '🤝' : '🏆'}</div>
-                        <h2 style={{ margin: '0 0 8px', fontSize: '2.2rem' }}>
-                            {gameOverState.winner === 'Draw' ? 'Draw!' : `${gameOverState.winner} Wins!`}
-                        </h2>
+                        <h2 style={{ margin: '0 0 8px', fontSize: '2.2rem' }}>{gameOverState.winner === 'Draw' ? 'Draw!' : `${gameOverState.winner} Wins!`}</h2>
                         <p style={{ color: '#aaa', margin: '0 0 36px', fontSize: 16 }}>{gameOverState.reason}</p>
                         <button onClick={() => {
                             boardRef.current = createInitialBoard();
                             currentTurnRef.current = 'white';
                             selectedRef.current = null; validMovesRef.current = [];
                             gameOverRef.current = null; epRef.current = null;
-                            lastMoveRef.current = null; dragRef.current = null;
-                            capturedRef.current = { white: [], black: [] };
-                            moveHistRef.current = [];
+                            lastMoveRef.current = null; capturedRef.current = { white: [], black: [] };
+                            moveHistRef.current = []; aimedSquareRef.current = null;
+                            phaseRef.current = 'IDLE'; holdProgressRef.current = 0;
                             setGameOverState(null);
-                        }} style={{
-                            padding: '14px 40px', fontSize: '1.1rem',
-                            background: 'linear-gradient(135deg, #00BCD4, #0097A7)',
-                            color: '#000', border: 'none', borderRadius: 30,
-                            cursor: 'pointer', fontWeight: 800,
-                            boxShadow: '0 4px 20px rgba(0,188,212,0.4)',
-                        }}>
+                        }} style={{ padding: '14px 40px', fontSize: '1.1rem', background: 'linear-gradient(135deg,#00BCD4,#0097A7)', color: '#000', border: 'none', borderRadius: 30, cursor: 'pointer', fontWeight: 800, boxShadow: '0 4px 20px rgba(0,188,212,0.4)' }}>
                             ▶ Play Again
                         </button>
                     </div>

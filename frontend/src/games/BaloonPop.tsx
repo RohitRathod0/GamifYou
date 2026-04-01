@@ -3,6 +3,7 @@ import { HandTrackingData } from '@/hooks/useHandTracking';
 
 interface BalloonPopProps {
     trackingData: HandTrackingData;
+    trackingDataRef?: React.MutableRefObject<HandTrackingData>;
     playerId: string;
     gameState: any;
     onStateUpdate: (state: any) => void;
@@ -11,6 +12,7 @@ interface BalloonPopProps {
 
 export const BalloonPop: React.FC<BalloonPopProps> = ({
     trackingData,
+    trackingDataRef,
     playerId: _playerId,
     gameState: _gameState,
     onStateUpdate: _onStateUpdate,
@@ -30,12 +32,16 @@ export const BalloonPop: React.FC<BalloonPopProps> = ({
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
+        let running = true;
         const gameLoop = () => {
+            if (!running) return;
+            
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
             // Draw hand tracking position
-            if (trackingData.landmarks[0]) {
-                const palm = trackingData.landmarks[0][9];
+            const currentData = trackingDataRef?.current || trackingData;
+            if (currentData.landmarks[0]) {
+                const palm = currentData.landmarks[0][9];
                 ctx.fillStyle = '#00ff00';
                 ctx.beginPath();
                 ctx.arc(palm.x * canvas.width, palm.y * canvas.height, 20, 0, Math.PI * 2);
@@ -57,11 +63,12 @@ export const BalloonPop: React.FC<BalloonPopProps> = ({
         gameLoop();
 
         return () => {
+            running = false;
             if (animationRef.current) {
                 cancelAnimationFrame(animationRef.current);
             }
         };
-    }, [trackingData]);
+    }, [trackingData, trackingDataRef]);
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '20px' }}>

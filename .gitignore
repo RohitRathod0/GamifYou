@@ -53,3 +53,20 @@ dump.rdb
 mkcert*
 *.pem
 *.key
+
+# Temp folders and scratch files
+tmp_*/
+tmp_video_frames/
+*.txt
+refresh.txt
+trigger.txt
+
+# Internal dev notes — never commit these
+FACE_SWAP_TESTING.md
+HTTPS_READY.md
+HTTPS_SETUP.md
+MULTIPLAYER_SETUP.md
+LOCAL_MULTIPLAYER_GUIDE.md
+*_TESTING.md
+*_SETUP.md
+*_GUIDE.md

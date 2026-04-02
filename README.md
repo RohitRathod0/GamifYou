@@ -8,7 +8,7 @@
 ## 🧠 How It Works
 GamifYou extracts skeletal hand data directly in the browser via WebAssembly to ensure strict privacy and low-latency client-side tracking. This landmark data streams over WebSockets to a high-performance Python FastAPI engine which analyzes hand gestures locally. The server applies statistical smoothing, emits gesture commands, and maintains deterministic state across a multiplayer session using Redis Pub/Sub, resulting in <5ms tracking loops.
 
-```
+```text
 Browser (Player 1)          Browser (Player 2)
 ┌─────────────────┐         ┌─────────────────┐
 │ MediaPipe Hands │         │ MediaPipe Hands │
@@ -61,7 +61,7 @@ Browser (Player 1)          Browser (Player 2)
    ```
 3. Setup the frontend.
    ```bash
-   cd ../frontend
+   cd frontend
    npm install
    cp .env.example .env.local
    ```
@@ -87,18 +87,18 @@ Terminal 2 (Frontend): `npm run dev`
 | `VITE_WS_URL` | Frontend | Target address to websocket layer. |
 
 ## 📁 Project Structure
-```
+```text
 GamifYou/
 ├── backend/            # FastAPI, Redis integration, server-side room tracking
 ├── docs/               # System architecture records
 └── frontend/           # React dashboard UI
     └── src/
-        ├── components/ # Reusable React UI layouts
-        ├── context/    # Shared Application states
-        ├── games/      # Zero-render canvas-based gesture loops
-        ├── hooks/      # Shared custom logic (i.e., useHandTracking)
-        ├── types/      # Global TypeScript interface definitions
-        └── utils/      # Standard mathematical and logic processors
+        ├── components/ # Reusable UI components only
+        ├── context/    # React context providers
+        ├── games/      # One folder per game (AirHockey/, Chess/, etc.)
+        ├── hooks/      # All custom hooks (useHandTracking, useWebSocket, etc.)
+        ├── types/      # All shared TypeScript interfaces and types
+        └── utils/      # Pure helper functions and constants
 ```
 
 ## 🔧 Key Technical Decisions
@@ -111,7 +111,7 @@ GamifYou/
 2. We currently only track a single dominant hand efficiently. **Fix:** Full multi-hand concurrent logic is scheduled.
 
 ## 🤝 Contributing
-Read the [CONTRIBUTING.md](./.github/CONTRIBUTING.md) to understand how to format patches, follow the `feat/` and `fix/` methodology, and establish standardized PR layouts.
+Read the [.github/CONTRIBUTING.md](./.github/CONTRIBUTING.md) to understand how to format patches, follow the `feat/` and `fix/` methodology, and establish standardized PR layouts.
 
 ## 📄 License
 MIT

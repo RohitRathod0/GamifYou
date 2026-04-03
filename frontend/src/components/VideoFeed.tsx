@@ -1,8 +1,8 @@
 import { useRef, useEffect, useState } from 'react';
 import { useHandTracking } from '@/hooks/useHandTracking';
-import { BackgroundConfig } from '@/features/background/types';
-import { STYLE_FILTERS, BACKGROUND_IMAGES } from '@/features/background/backgroundData';
-import { getSegmentation } from '@/features/background/segmentationSingleton';
+import { BackgroundConfig } from '@/components/Background/types';
+import { STYLE_FILTERS, BACKGROUND_IMAGES } from '@/components/Background/backgroundData';
+import { getSegmentation } from '@/components/Background/segmentationSingleton';
 
 
 interface VideoFeedProps {

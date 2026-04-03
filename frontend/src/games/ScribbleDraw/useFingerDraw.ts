@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { HandTrackingData } from '@/hooks/useHandTracking';
-import { getPinchDistance, landmarkToCanvas } from '@/games/GestureController';
+import { getPinchDistance, landmarkToCanvas } from '@/games/Chess/GestureController';
 
 export interface Point {
     x: number;

@@ -14,7 +14,7 @@
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { HandTrackingData } from '@/hooks/useHandTracking';
-import { drawHandSkeleton, landmarkToCanvas, HandLandmark } from './GestureController';
+import { drawHandSkeleton, landmarkToCanvas, HandLandmark } from '../Chess/GestureController';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const GRID = 3;

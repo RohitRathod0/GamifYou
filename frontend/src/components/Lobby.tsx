@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { roomAPI } from '@/services/api';
+import { roomAPI } from '@/utils/api';
 
 interface LobbyProps {
     appState: any;

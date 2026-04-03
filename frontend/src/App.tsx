@@ -2,8 +2,8 @@ import { useState } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { Lobby } from '@/components/Lobby';
 import { RoomView } from '@/components/RoomView';
-import { AIAvatar } from '@/features/avatar/AIAvatar';
-import { VirtualBackground } from '@/features/background/VirtualBackground';
+import { AIAvatar } from '@/components/Avatar/AIAvatar';
+import { VirtualBackground } from '@/components/Background/VirtualBackground';
 
 export interface AppState {
     username: string;

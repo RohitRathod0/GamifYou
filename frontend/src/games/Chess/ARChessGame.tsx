@@ -20,7 +20,6 @@ import {
     isInCheck, cloneBoard, PIECE_UNICODE,
     Board, Piece, PieceColor, PieceType, Position,
 } from './ChessLogic';
-import { WS_BASE_URL } from '@/utils/constants';
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const BOARD_COLS = 8;
@@ -32,8 +31,8 @@ const CURSOR_FAST_THRESHOLD_PX = 28;
 const SNAP_HYSTERESIS_PX = 24;
 
 // Hold-pinch timing
-const HOLD_SELECT_MS = 1000;   // hold pinch 1s → SELECT piece
-const QUICK_PINCH_MAX_MS = 400; // pinch released in <400ms → CONFIRM move
+const HOLD_SELECT_MS = 400;    // hold pinch 400ms → SELECT piece (feels natural)
+const QUICK_PINCH_MAX_MS = 600; // pinch released in <600ms → CONFIRM move (forgiving window)
 
 // Board colors
 const LIGHT_SQ = 'rgba(232, 244, 252, 0.72)';
@@ -57,17 +56,18 @@ interface ARChessGameProps {
     playerId: string;
     gameState?: any;
     onStateUpdate?: (s: any) => void;
+    /** Shared WebSocket sender from RoomView — avoids opening a duplicate WS */
+    sendMessage?: (type: string, data: any) => void;
 }
 
 interface ScreenPoint { x: number; y: number; }
 
-export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, onStateUpdate }) => {
+export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, onStateUpdate, sendMessage }) => {
     // ── Refs ──────────────────────────────────────────────────────────────────
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const videoRef = useRef<HTMLVideoElement>(null);
     const handsRef = useRef<Hands | null>(null);
     const camRef = useRef<Camera | null>(null);
-    const wsRef = useRef<WebSocket | null>(null);
     const rafRef = useRef<number>(0);
 
     // Game state refs
@@ -104,36 +104,21 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
     const [debugMode, setDebugMode] = useState(false);
     const [, setMyColor] = useState<PieceColor>('white');
 
-    const roomCode = gameState?.room_code || 'chess_room';
-
-    // ── WebSocket ─────────────────────────────────────────────────────────────
+    // ── Colour bootstrap — applied from RoomView's gameState prop ────────────
+    // No separate WebSocket is opened here; the shared WS in RoomView handles
+    // chess_color_assign and game_state_update messages and forwards them via
+    // the gameState prop so this component stays stateless w.r.t. the socket.
     useEffect(() => {
-        const ws = new WebSocket(`${WS_BASE_URL}/ws/${roomCode}/${playerId}`);
-        wsRef.current = ws;
-        ws.onmessage = (e) => {
-            try {
-                const msg = JSON.parse(e.data);
-                if (msg.type === 'game_state_update') {
-                    const s = msg.data?.state;
-                    if (s?.chessBoard) boardRef.current = s.chessBoard;
-                    if (s?.currentTurn) currentTurnRef.current = s.currentTurn;
-                    if (s?.enPassantTarget !== undefined) epRef.current = s.enPassantTarget;
-                    if (s?.lastMove !== undefined) lastMoveRef.current = s.lastMove;
-                    if (s?.gameOver) { gameOverRef.current = s.gameOver; setGameOverState(s.gameOver); }
-                }
-                if (msg.type === 'chess_color_assign') {
-                    myColorRef.current = msg.data.color;
-                    setMyColor(msg.data.color);
-                }
-            } catch { /* ignore parse errors */ }
-        };
-        ws.onerror = () => {
+        if (gameState?.my_color) {
+            myColorRef.current = gameState.my_color as PieceColor;
+            setMyColor(gameState.my_color as PieceColor);
+        } else {
+            // Fallback before server assigns a color
             const col: PieceColor = gameState?.player1_id === playerId ? 'white' : 'black';
             myColorRef.current = col;
             setMyColor(col);
-        };
-        return () => ws.close();
-    }, [roomCode, playerId, gameState]);
+        }
+    }, [gameState, playerId]);
 
     // ── Board layout helpers ──────────────────────────────────────────────────
     /** Compute stable layout (no float) — used for hit-testing */
@@ -244,8 +229,9 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
 
         const ns = { chessBoard: nb, currentTurn: next, enPassantTarget: newEp, lastMove: { from, to } };
         onStateUpdate?.(ns);
-        wsRef.current?.send(JSON.stringify({ type: 'game_state_update', data: { state: ns } }));
-    }, [onStateUpdate]);
+        // Use the shared sendMessage from RoomView — the WS is guaranteed OPEN
+        sendMessage?.('game_state_update', { state: ns });
+    }, [onStateUpdate, sendMessage]);
 
     // ── FIX 1 & 2: Gesture processor — called from MediaPipe onResults
     //   Uses refs only — no stale closures, never recreated ──────────────────
@@ -320,33 +306,50 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
                 aimedSquareRef.current = aimed ?? null;
 
                 if (pinchStarted) {
-                    pinchStartTimeRef.current = now; // track for quick-pinch detection
+                    // Always reset timer on a fresh pinch edge
+                    pinchStartTimeRef.current = now;
+                }
+
+                // Guard: if phase entered while already pinching, timer would be 0 — fix it
+                if (isPinching && pinchStartTimeRef.current === 0) {
+                    pinchStartTimeRef.current = now;
                 }
 
                 if (pinchEnded) {
-                    const heldMs = now - pinchStartTimeRef.current;
+                    // If timer was never set treat as instant quick-pinch (0ms held)
+                    const heldMs = pinchStartTimeRef.current > 0
+                        ? now - pinchStartTimeRef.current
+                        : 0;
 
-                    if (heldMs < QUICK_PINCH_MAX_MS && sq) {
-                        // ✅ Quick-pinch: CONFIRM move if aimed at valid square
-                        const target = aimedSquareRef.current;
-                        if (target && legal.some(m => m.row === target.row && m.col === target.col)) {
+                    const isQuickPinch = heldMs < QUICK_PINCH_MAX_MS;
+                    const isLongHold = heldMs >= HOLD_SELECT_MS;
+
+                    if (isQuickPinch) {
+                        // ✅ Quick-pinch: CONFIRM move
+                        // Prefer snapped aimed square, fall back to sq directly under cursor
+                        const target = (aimed && legal.some(m => m.row === aimed.row && m.col === aimed.col))
+                            ? aimed
+                            : (sq && legal.some(m => m.row === sq.row && m.col === sq.col))
+                                ? sq
+                                : null;
+
+                        if (target) {
                             doMove(selectedRef.current!, target);
-                        } else if (legal.some(m => m.row === sq.row && m.col === sq.col)) {
-                            doMove(selectedRef.current!, sq);
                         } else {
-                            // Quick-pinch on invalid square → DESELECT
+                            // Pinched on invalid square → deselect
                             selectedRef.current = null;
                             validMovesRef.current = [];
                             aimedSquareRef.current = null;
                             phaseRef.current = 'IDLE';
                         }
-                    } else if (heldMs >= HOLD_SELECT_MS) {
-                        // Long hold-pinch while selected → DESELECT (cancel)
+                    } else if (isLongHold) {
+                        // Long hold while selected → CANCEL selection
                         selectedRef.current = null;
                         validMovesRef.current = [];
                         aimedSquareRef.current = null;
                         phaseRef.current = 'IDLE';
                     }
+                    // Gray zone (400–600ms): do nothing, stay in SELECTED
                     pinchStartTimeRef.current = 0;
                 }
             }
@@ -612,9 +615,9 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
         const phaseHint = phase === 'HOLDING'
             ? `🤌 Hold… (${Math.round(holdProgressRef.current * 100)}%)`
             : phase === 'SELECTED'
-                ? '👆 Aim at a dot, quick-pinch to move'
+                ? '👆 Move finger to dot → quick pinch to confirm'
                 : myColorRef.current === currentTurnRef.current
-                    ? '👆 Your turn — hover & hold-pinch to select'
+                    ? '👆 Your turn — hover a piece & hold pinch (0.4s)'
                     : `⏳ ${currentTurnRef.current}'s turn`;
 
         const statusText = gameOverRef.current
@@ -668,7 +671,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
         }
 
         // ── Gesture hints ─────────────────────────────────────────────────────
-        const hints = ['🖐 Hold pinch 1s = select piece', '🤌 Quick pinch on dot = move', '✌️ Peace sign = reset'];
+        const hints = ['🖐 Hold pinch 0.4s = select piece', '🤌 Quick pinch on green dot = move', '✌️ Peace sign = reset'];
         ctx.save();
         ctx.font = '12px "Segoe UI"'; ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(255,255,255,0.45)';
         hints.forEach((h, i) => ctx.fillText(h, W - 16, H - 70 + i * 18));
@@ -797,7 +800,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
         phaseRef.current = 'IDLE';
         const ns = { chessBoard: nb, currentTurn: next, enPassantTarget: null, lastMove: lastMoveRef.current };
         onStateUpdate?.(ns);
-        wsRef.current?.send(JSON.stringify({ type: 'game_state_update', data: { state: ns } }));
+        sendMessage?.('game_state_update', { state: ns });
     };
 
     // ── JSX ───────────────────────────────────────────────────────────────────

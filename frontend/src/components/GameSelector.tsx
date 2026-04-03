@@ -1,20 +1,22 @@
 import React from 'react';
 import { AirHockey } from '@/games/AirHockey';
-import { BalloonPop } from '@/games/BaloonPop';
-import { ARChessGame } from '@/games/ARChessGame';
+import { BalloonPop } from '@/games/BalloonPop';
+import { ARChessGame } from '@/games/Chess/ARChessGame';
 import { FacePuzzle } from '@/games/FacePuzzle';
 import { ScribbleDraw } from '@/games/ScribbleDraw';
 import { GAMES } from '@/utils/constants';
 import { HandTrackingData } from '@/hooks/useHandTracking';
+
+import { GameState } from '@/types';
 
 interface GameSelectorProps {
     game: string;
     trackingData?: HandTrackingData;
     trackingDataRef?: React.MutableRefObject<HandTrackingData>;
     playerId?: string;
-    gameState?: any;
-    onStateUpdate?: (state: any) => void;
-    sendMessage?: (type: string, data: any) => void;
+    gameState?: GameState;
+    onStateUpdate?: (state: Partial<GameState>) => void;
+    sendMessage?: (type: string, data: Record<string, unknown>) => void;
 }
 
 export const GameSelector: React.FC<GameSelectorProps> = ({

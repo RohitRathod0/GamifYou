@@ -45,10 +45,9 @@ const BOARD_BORDER = 'rgba(0, 220, 255, 0.9)';
 
 // Gesture phase
 type GesturePhase =
-    | 'IDLE'       // no piece selected, hovering
-    | 'HOLDING'    // pinch held, timer counting toward SELECT
-    | 'SELECTED'   // piece selected, showing valid moves, aiming
-    | 'COOLDOWN';  // brief cooldown after a move
+    | 'IDLE'       // no piece selected, pointing around
+    | 'SELECTED'   // piece selected, pointing at destination
+    | 'COOLDOWN';  // brief pause after a move
 
 interface ARChessGameProps {
     playerId: string;
@@ -84,14 +83,15 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
     const moveHistRef = useRef<string[]>([]);
 
     // Gesture / interaction refs
-    const gestureRef = useRef<GestureState | null>(null);
-    const cursorRef = useRef<ScreenPoint | null>(null);
-    const cursorHistRef = useRef<ScreenPoint[]>([]);
-    const phaseRef = useRef<GesturePhase>('IDLE');
-    const prevPinchRef = useRef(false);
-    const pinchStartTimeRef = useRef<number>(0);   // when pinch began
-    const holdProgressRef = useRef<number>(0);     // 0–1 progress toward 1s
-    const aimedSquareRef = useRef<Position | null>(null); // square being aimed at while SELECTED
+    const gestureRef       = useRef<GestureState | null>(null);
+    const cursorRef        = useRef<ScreenPoint | null>(null);
+    const cursorHistRef    = useRef<ScreenPoint[]>([]);
+    const phaseRef         = useRef<GesturePhase>('IDLE');
+    // Dwell tracking — used for both select (IDLE) and move (SELECTED)
+    const dwellSquareRef   = useRef<Position | null>(null);  // square currently being dwelled on
+    const dwellStartRef    = useRef<number>(0);              // timestamp dwell began
+    const dwellProgressRef = useRef<number>(0);              // 0–1 visual progress
+    const aimedSquareRef   = useRef<Position | null>(null);  // legal destination being aimed at
 
     // FIX 4: stable board layout for hit-testing (no float offset)
     const stableBoardRef = useRef({ x: 0, y: 0, sqSize: 0, totalSize: 0 });
@@ -293,7 +293,10 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
     }, [onStateUpdate, sendWsMessage, playerId]);
 
     // ── Gesture processor ─────────────────────────────────────────────────────
-    // Called every MediaPipe frame. Runs entirely via refs — no stale closures.
+    // Pure point/dwell control — NO pinching needed:
+    //   IDLE:     point at YOUR piece and hold still 0.4s → piece SELECTED
+    //   SELECTED: point at a legal destination and hold still 0.4s → piece MOVES
+    //   Re-dwell on selected piece → DESELECT
     // ─────────────────────────────────────────────────────────────────────────
     const processGestureRef = useRef<(gs: GestureState, W: number, H: number) => void>(() => { });
 
@@ -306,103 +309,90 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
             const cursor = smoothCursor(rawCursor);
             cursorRef.current = cursor;
 
-            const sq        = screenToSquare(cursor.x, cursor.y);
-            const now       = performance.now();
-            const isPinching  = gs.isPinching;
-            const wasPinching = prevPinchRef.current;
-            const pinchStarted = isPinching && !wasPinching;   // rising edge
-            // falling edge (we do NOT use pinchEnded for move confirmation anymore)
+            const sq  = screenToSquare(cursor.x, cursor.y);
+            const now = performance.now();
 
-            // ── IDLE / COOLDOWN ──────────────────────────────────────────────
-            if (phaseRef.current === 'IDLE' || phaseRef.current === 'COOLDOWN') {
+            // ── Dwell tracking ───────────────────────────────────────────────
+            // If the finger has moved to a different board square, reset the
+            // dwell timer. Same square = accumulate time toward 0.4s threshold.
+            const prev   = dwellSquareRef.current;
+            const sameSq = sq && prev && sq.row === prev.row && sq.col === prev.col;
+
+            if (!sameSq) {
+                // Moved to a new square (or off board) — restart timer
+                dwellSquareRef.current   = sq;
+                dwellStartRef.current    = sq ? now : 0;
+                dwellProgressRef.current = 0;
+            } else if (sq) {
+                // Hovering same square — accumulate
+                const elapsed = now - dwellStartRef.current;
+                dwellProgressRef.current = Math.min(elapsed / HOLD_SELECT_MS, 1);
+            }
+
+            const dwellElapsed = (sq && sameSq) ? (now - dwellStartRef.current) : 0;
+
+            // ── IDLE ─────────────────────────────────────────────────────────
+            if (phaseRef.current === 'IDLE') {
                 aimedSquareRef.current = null;
-                if (pinchStarted && phaseRef.current === 'IDLE') {
-                    pinchStartTimeRef.current = now;
-                    holdProgressRef.current   = 0;
-                    phaseRef.current = 'HOLDING';
-                }
-            }
 
-            // ── HOLDING — count to HOLD_SELECT_MS ───────────────────────────
-            // NOTE: use phaseRef.current (live), not the stale `phase` snapshot,
-            // so this block runs even in the same frame we transitioned from IDLE.
-            if (phaseRef.current === 'HOLDING') {
-                if (!isPinching) {
-                    // Released too early — cancel
-                    phaseRef.current      = 'IDLE';
-                    holdProgressRef.current   = 0;
-                    pinchStartTimeRef.current = 0;
-                } else {
-                    const elapsed = now - pinchStartTimeRef.current;
-                    holdProgressRef.current = Math.min(elapsed / HOLD_SELECT_MS, 1);
+                if (sq && dwellElapsed >= HOLD_SELECT_MS) {
+                    const myColor = myColorRef.current;
+                    const piece   = boardRef.current[sq.row]?.[sq.col];
 
-                    if (elapsed >= HOLD_SELECT_MS) {
-                        // Timer complete — try to select the piece under the cursor
-                        const myColor  = myColorRef.current;
-                        const piece    = sq ? boardRef.current[sq.row]?.[sq.col] : null;
-                        const isMyTurn  = myColor === currentTurnRef.current;
-                        const isMyPiece = piece?.color === myColor;
+                    if (piece && piece.color === myColor && myColor === currentTurnRef.current) {
+                        // ✅ SELECT
+                        selectedRef.current    = sq;
+                        validMovesRef.current  = getLegalMoves(boardRef.current, sq, epRef.current);
+                        aimedSquareRef.current = null;
+                        phaseRef.current       = 'SELECTED';
 
-                        if (sq && isMyTurn && isMyPiece) {
-                            selectedRef.current    = sq;
-                            validMovesRef.current  = getLegalMoves(boardRef.current, sq, epRef.current);
-                            aimedSquareRef.current = null;
-                            phaseRef.current       = 'SELECTED';
-                        } else {
-                            phaseRef.current = 'IDLE'; // wrong piece / not our turn
-                        }
-                        holdProgressRef.current   = 0;
-                        pinchStartTimeRef.current = 0;
+                        // Reset dwell so destination timer starts fresh
+                        dwellSquareRef.current   = null;
+                        dwellStartRef.current    = 0;
+                        dwellProgressRef.current = 0;
                     }
+                    // else: hovered over wrong piece / empty / opponent — ignore
                 }
             }
 
-            // ── SELECTED — piece chosen, user aims then pinches to confirm ───
-            // KEY DESIGN: NO timer here. Just:
-            //   • Update aimed square every frame
-            //   • pinchStarted on a legal square   → EXECUTE MOVE
-            //   • pinchStarted on an illegal square → DESELECT
-            //   • peace gesture                     → DESELECT
-            //
-            // We intentionally ignore the first release (the end of the
-            // hold-select gesture) by only acting on pinch STARTS, not ends.
-            // Since the user was already pinching when we entered SELECTED,
-            // pinchStarted will be false until they fully release and re-pinch.
+            // ── SELECTED ─────────────────────────────────────────────────────
             if (phaseRef.current === 'SELECTED') {
                 const legal = validMovesRef.current;
 
-                // Always update aimed square so the blue highlight follows the cursor
+                // Update aimed square continuously (blue snapping highlight follows cursor)
                 const aimed = snapToLegal(cursor, selectedRef.current!, legal);
                 aimedSquareRef.current = aimed ?? null;
 
-                if (pinchStarted) {
-                    // Check aimed first (snap result), then raw sq under cursor
-                    const isAimedLegal = aimed && legal.some(m => m.row === aimed.row && m.col === aimed.col);
-                    const isSqLegal    = sq    && legal.some(m => m.row === sq.row    && m.col === sq.col);
+                if (sq && dwellElapsed >= HOLD_SELECT_MS) {
+                    const isLegal = legal.some(m => m.row === sq.row && m.col === sq.col);
+                    const isSamePiece = selectedRef.current &&
+                        sq.row === selectedRef.current.row && sq.col === selectedRef.current.col;
 
-                    if (isAimedLegal) {
-                        doMove(selectedRef.current!, aimed!);
-                    } else if (isSqLegal) {
-                        doMove(selectedRef.current!, sq!);
-                    } else {
-                        // Pinched on a non-legal square → cancel selection
+                    if (isLegal) {
+                        // ✅ MOVE — dwell completed on a legal destination
+                        doMove(selectedRef.current!, sq);
+                        dwellSquareRef.current   = null;
+                        dwellStartRef.current    = 0;
+                        dwellProgressRef.current = 0;
+                    } else if (isSamePiece) {
+                        // Re-dwell on the selected piece → DESELECT
                         selectedRef.current    = null;
                         validMovesRef.current  = [];
                         aimedSquareRef.current = null;
                         phaseRef.current       = 'IDLE';
+                        dwellSquareRef.current   = null;
+                        dwellStartRef.current    = 0;
+                        dwellProgressRef.current = 0;
                     }
-                }
-
-                // ✌️ Peace sign → cancel selection (escape hatch)
-                if (gs.gesture === 'peace') {
-                    selectedRef.current    = null;
-                    validMovesRef.current  = [];
-                    aimedSquareRef.current = null;
-                    phaseRef.current       = 'IDLE';
+                    // else: dwell on empty / opponent square — stay SELECTED, let user aim elsewhere
                 }
             }
 
-            prevPinchRef.current = isPinching;
+            // ── COOLDOWN ─────────────────────────────────────────────────────
+            if (phaseRef.current === 'COOLDOWN') {
+                aimedSquareRef.current   = null;
+                dwellProgressRef.current = 0;
+            }
         };
     }); // no deps — always captures latest refs/callbacks
 
@@ -562,47 +552,57 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
         }
         ctx.restore();
 
-        // ── Hold-pinch progress ring (HOLDING phase) ──────────────────────────
-        if (phase === 'HOLDING' && cursorPt) {
-            const prog = holdProgressRef.current;
+        // ── Dwell progress ring ───────────────────────────────────────────────
+        // Green ring = dwelling to SELECT a piece (IDLE phase)
+        // Blue ring  = dwelling to CONFIRM a move  (SELECTED phase, on legal sq)
+        const dwellProg = dwellProgressRef.current;
+        const isDwellingOnLegal = phase === 'SELECTED' && aimed &&
+            vm.some(m => m.row === aimed.row && m.col === aimed.col);
+        const showDwellRing = cursorPt && dwellProg > 0.05 &&
+            (phase === 'IDLE' || (phase === 'SELECTED' && isDwellingOnLegal));
+
+        if (showDwellRing && cursorPt) {
+            const isMove = phase === 'SELECTED';
+            const prog   = dwellProg;
             ctx.save();
-            ctx.strokeStyle = `rgba(0, 255, 136, ${0.4 + prog * 0.6})`;
-            ctx.lineWidth = 5;
-            ctx.shadowColor = '#00FF88'; ctx.shadowBlur = 16;
+            ctx.strokeStyle = isMove
+                ? `rgba(0,170,255,${0.4 + prog * 0.6})`
+                : `rgba(0,255,136,${0.4 + prog * 0.6})`;
+            ctx.lineWidth = 6;
+            ctx.shadowColor = isMove ? '#00AAFF' : '#00FF88'; ctx.shadowBlur = 18;
             ctx.beginPath();
-            ctx.arc(cursorPt.x, cursorPt.y, 28, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * prog);
+            ctx.arc(cursorPt.x, cursorPt.y, 32, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * prog);
             ctx.stroke();
-            // Inner pulsing dot
-            ctx.fillStyle = `rgba(0,255,136,${0.3 + prog * 0.5})`;
-            ctx.beginPath(); ctx.arc(cursorPt.x, cursorPt.y, 8 + prog * 6, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = isMove
+                ? `rgba(0,170,255,${0.35 + prog * 0.55})`
+                : `rgba(0,255,136,${0.35 + prog * 0.55})`;
+            ctx.shadowBlur = 12;
+            ctx.beginPath(); ctx.arc(cursorPt.x, cursorPt.y, 7 + prog * 7, 0, Math.PI * 2); ctx.fill();
             ctx.restore();
         }
 
         // ── Cursor ────────────────────────────────────────────────────────────
         if (gs && cursorPt) {
             const { x: cx, y: cy } = cursorPt;
-            const isPinch = gs.isPinching;
             const color = phase === 'SELECTED'
-                ? (aimed && vm.some(m => m.row === aimed.row && m.col === aimed.col) ? '#00AAFF' : '#FF4444')
-                : (isPinch ? '#00FF88' : '#00CCFF');
+                ? (aimed && vm.some(m => m.row === aimed.row && m.col === aimed.col) ? '#00AAFF' : '#FF6666')
+                : '#00E5FF';
 
             ctx.save();
             ctx.shadowColor = color; ctx.shadowBlur = 22;
             ctx.strokeStyle = color; ctx.lineWidth = 2;
-            ctx.beginPath(); ctx.arc(cx, cy, isPinch ? 16 : 12, 0, Math.PI * 2); ctx.stroke();
+            ctx.beginPath(); ctx.arc(cx, cy, 12, 0, Math.PI * 2); ctx.stroke();
             ctx.shadowBlur = 12;
             ctx.fillStyle = color;
-            ctx.beginPath(); ctx.arc(cx, cy, isPinch ? 7 : 5, 0, Math.PI * 2); ctx.fill();
-            // Crosshair
+            ctx.beginPath(); ctx.arc(cx, cy, 5, 0, Math.PI * 2); ctx.fill();
             ctx.shadowBlur = 0;
-            ctx.strokeStyle = color.replace(')', ', 0.7)').replace('rgb', 'rgba');
             ctx.lineWidth = 1.5;
             const arm = 18;
             ctx.beginPath();
-            ctx.moveTo(cx - arm, cy); ctx.lineTo(cx - 7, cy);
-            ctx.moveTo(cx + 7, cy); ctx.lineTo(cx + arm, cy);
-            ctx.moveTo(cx, cy - arm); ctx.lineTo(cx, cy - 7);
-            ctx.moveTo(cx, cy + 7); ctx.lineTo(cx, cy + arm);
+            ctx.moveTo(cx - arm, cy); ctx.lineTo(cx - 8, cy);
+            ctx.moveTo(cx + 8, cy);   ctx.lineTo(cx + arm, cy);
+            ctx.moveTo(cx, cy - arm); ctx.lineTo(cx, cy - 8);
+            ctx.moveTo(cx, cy + 8);   ctx.lineTo(cx, cy + arm);
             ctx.stroke();
             ctx.restore();
         }
@@ -624,7 +624,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
             ctx.fillStyle = '#00E5FF'; ctx.font = '12px "Segoe UI"';
             ctx.fillText(`Moves: ${moveList || 'none'}`, 28, 118);
             ctx.fillStyle = 'rgba(255,255,255,0.65)'; ctx.font = '11px "Segoe UI"';
-            ctx.fillText('Aim at a move dot, then quick-pinch to confirm', 28, 138);
+            ctx.fillText('Point at a blue dot → hold 0.4s to move', 28, 138);
             ctx.restore();
         }
 
@@ -652,7 +652,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
                     // Hint if it's player's piece and their turn
                     if (hovPiece.color === myCol && myCol === currentTurnRef.current) {
                         ctx.fillStyle = '#00E5FF'; ctx.font = '11px "Segoe UI"'; ctx.textBaseline = 'top';
-                        ctx.fillText('Hold pinch 0.4s to select → pinch on blue dot to move', ttX + 12, ttY + 36);
+                        ctx.fillText('Point & hold 0.4s to select → point at blue dot 0.4s to move', ttX + 12, ttY + 36);
                     }
                     ctx.restore();
                 }
@@ -661,13 +661,11 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
 
         // ── Status bar ────────────────────────────────────────────────────────
         const inChk = isInCheck(board, currentTurnRef.current);
-        const phaseHint = phase === 'HOLDING'
-            ? `🤌 Hold… (${Math.round(holdProgressRef.current * 100)}%)`
-            : phase === 'SELECTED'
-                ? '👆 Move finger to dot → quick pinch to confirm'
-                : myColorRef.current === currentTurnRef.current
-                    ? '👆 Your turn — hover a piece & hold pinch (0.4s)'
-                    : `⏳ ${currentTurnRef.current}'s turn`;
+        const phaseHint = phase === 'SELECTED'
+            ? '👆 Point at a blue dot and hold 0.4s to move'
+            : myColorRef.current === currentTurnRef.current
+                ? '👆 Your turn — point at your piece and hold 0.4s to select'
+                : `⏳ ${currentTurnRef.current}'s turn`;
 
         const statusText = gameOverRef.current
             ? `${gameOverRef.current.winner === 'Draw' ? '🤝 Draw' : `🏆 ${gameOverRef.current.winner} wins`} — ${gameOverRef.current.reason}`
@@ -720,7 +718,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
         }
 
         // ── Gesture hints ─────────────────────────────────────────────────────
-        const hints = ['🖐 Hold pinch 0.4s = SELECT piece', '🤌 Pinch on blue dot = MOVE piece', '✌️ Peace sign = cancel selection'];
+        const hints = ['👆 Point at piece + hold 0.4s = SELECT', '👆 Point at blue dot + hold 0.4s = MOVE', 'Move away to cancel dwell'];
         ctx.save();
         ctx.font = '12px "Segoe UI"'; ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(255,255,255,0.45)';
         hints.forEach((h, i) => ctx.fillText(h, W - 16, H - 70 + i * 18));

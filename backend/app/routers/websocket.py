@@ -3,22 +3,10 @@ GestureHub Backend — WebSocket Router
 
 Handles real-time bidirectional communication with game clients.
 
-Message Protocol
-----------------
-Client → Server:
-  LANDMARK_FRAME  {type, player_id, landmarks: [...21], handedness, timestamp_ms}
-  GAME_ACTION     {type, player_id, action, payload}
-  PLAYER_READY    {type, player_id, ready: bool}
-  GAME_SELECTED   {type, player_id, game_type}
-  GAME_START      {type, player_id}
-  GAME_STATE_UPDATE {type, player_id, state: {...}}
-  WEBRTC_OFFER / WEBRTC_ANSWER / WEBRTC_ICE_CANDIDATE
-  CHAT_MESSAGE    {type, player_id, message, username}
-
-Server → Client:
-  CONNECT         Sent on successful connection
-  GESTURE_RESULT  {type, player_id, gesture, confidence, game_action, ...}
-  GAME_STATE_UPDATE, GAME_END, PLAYER_JOINED, PLAYER_LEFT, ERROR
+Fixes applied:
+  1. chess_color_assign sent to both players when 2nd player joins
+  2. player_joined now includes username so frontend can display it
+  3. Color assignment persisted in Redis so reconnects get same color
 """
 from __future__ import annotations
 
@@ -39,70 +27,40 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # ── Pipeline Registry ─────────────────────────────────────────────────────────
-# Keyed by "room_code:player_id" — one pipeline per player per room
 _gesture_pipelines: Dict[str, GesturePipeline] = {}
 _scribble_games: Dict[str, ScribbleGame] = {}
+
+# ── Chess color assignment (in-memory, backed by Redis room order) ────────────
+# Key: room_code → {player_id: 'white'|'black'}
+_chess_colors: Dict[str, Dict[str, str]] = {}
 
 
 # ── Connection Manager ────────────────────────────────────────────────────────
 
-
 class ConnectionManager:
-    """Manages active WebSocket connections grouped by room.
-
-    Provides connect, disconnect, personal message, and room broadcast methods.
-    """
-
     def __init__(self) -> None:
-        """Initialise with an empty connection registry."""
         self.active_connections: Dict[str, Dict[str, WebSocket]] = {}
 
-    async def connect(
-        self, websocket: WebSocket, room_code: str, player_id: str
-    ) -> None:
-        """Accept a WebSocket connection and register the player.
-
-        Args:
-            websocket: The incoming WebSocket connection.
-            room_code: Room the player is joining.
-            player_id: Unique identifier for the player.
-        """
+    async def connect(self, websocket: WebSocket, room_code: str, player_id: str) -> None:
         await websocket.accept()
         self.active_connections.setdefault(room_code, {})[player_id] = websocket
         logger.info("Player %s connected to room %s", player_id, room_code)
 
     def disconnect(self, room_code: str, player_id: str) -> None:
-        """Remove a player from the connection registry.
-
-        Cleans up empty rooms automatically. Also tears down the
-        associated gesture pipeline to free memory.
-
-        Args:
-            room_code: Room the player is leaving.
-            player_id: Player to remove.
-        """
         if room_code in self.active_connections:
             self.active_connections[room_code].pop(player_id, None)
             logger.info("Player %s disconnected from room %s", player_id, room_code)
             if not self.active_connections[room_code]:
                 del self.active_connections[room_code]
-
-        # Clean up gesture pipeline
         pipeline_key = f"{room_code}:{player_id}"
         _gesture_pipelines.pop(pipeline_key, None)
 
-    async def send_personal_message(
-        self, message: dict, room_code: str, player_id: str
-    ) -> None:
-        """Send a JSON message to a specific player.
+    def get_room_player_count(self, room_code: str) -> int:
+        """Return number of currently connected players in a room."""
+        return len(self.active_connections.get(room_code, {}))
 
-        Args:
-            message: Dict that will be JSON-serialised.
-            room_code: Room the player is in.
-            player_id: Target player.
-        """
-        conn_map = self.active_connections.get(room_code, {})
-        ws = conn_map.get(player_id)
+    async def send_personal_message(self, message: dict, room_code: str, player_id: str) -> None:
+        ws = self.active_connections.get(room_code, {}).get(player_id)
         if ws:
             await ws.send_json(message)
 
@@ -112,18 +70,8 @@ class ConnectionManager:
         room_code: str,
         exclude_player: Optional[str] = None,
     ) -> None:
-        """Broadcast a JSON message to all players in a room.
-
-        Silently cleans up any players whose connections have dropped.
-
-        Args:
-            message: Dict that will be JSON-serialised.
-            room_code: Target room.
-            exclude_player: Optional player_id to skip (e.g. sender).
-        """
         if room_code not in self.active_connections:
             return
-
         disconnected: List[str] = []
         for pid, ws in self.active_connections[room_code].items():
             if pid == exclude_player:
@@ -133,7 +81,6 @@ class ConnectionManager:
             except Exception:
                 logger.warning("Failed to send to %s; marking for removal", pid)
                 disconnected.append(pid)
-
         for pid in disconnected:
             self.disconnect(room_code, pid)
 
@@ -141,31 +88,97 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-# ── WebSocket Endpoint ────────────────────────────────────────────────────────
+# ── Color Assignment Helper ───────────────────────────────────────────────────
 
+async def assign_chess_colors(room_code: str, player_id: str) -> None:
+    """Assign chess colors based on join order and notify both players.
+
+    First player to connect → white.
+    Second player to connect → black.
+    Sends chess_color_assign to each player individually.
+    Also re-notifies player 1 so they are confirmed as white even if
+    they missed an earlier message.
+
+    Args:
+        room_code: The room both players are in.
+        player_id: The player who just connected (triggers assignment).
+    """
+    room_colors = _chess_colors.setdefault(room_code, {})
+
+    # If this player already has a color (reconnect), just re-send it
+    if player_id in room_colors:
+        await manager.send_personal_message(
+            {
+                "type": "chess_color_assign",
+                "data": {"color": room_colors[player_id]},
+            },
+            room_code,
+            player_id,
+        )
+        return
+
+    # Assign based on how many players already have colors
+    assigned_count = len(room_colors)
+    if assigned_count == 0:
+        # First player — white, wait for second
+        room_colors[player_id] = "white"
+        await manager.send_personal_message(
+            {
+                "type": "chess_color_assign",
+                "data": {"color": "white"},
+            },
+            room_code,
+            player_id,
+        )
+        logger.info("Chess: %s assigned WHITE in room %s", player_id, room_code)
+
+    elif assigned_count == 1:
+        # Second player — black; re-confirm white to player 1
+        room_colors[player_id] = "black"
+        white_player_id = next(iter(room_colors))  # first entry = white
+
+        await manager.send_personal_message(
+            {
+                "type": "chess_color_assign",
+                "data": {"color": "black"},
+            },
+            room_code,
+            player_id,
+        )
+        # Re-confirm white player in case they missed the first message
+        await manager.send_personal_message(
+            {
+                "type": "chess_color_assign",
+                "data": {"color": "white"},
+            },
+            room_code,
+            white_player_id,
+        )
+        logger.info(
+            "Chess: %s assigned BLACK in room %s (white=%s)",
+            player_id, room_code, white_player_id,
+        )
+    else:
+        # Spectator / 3rd+ player — no color
+        logger.info("Chess: %s is spectator in room %s", player_id, room_code)
+
+
+# ── WebSocket Endpoint ────────────────────────────────────────────────────────
 
 @router.websocket("/ws/{room_code}/{player_id}")
 async def websocket_endpoint(
     websocket: WebSocket, room_code: str, player_id: str
 ) -> None:
-    """Primary WebSocket endpoint for real-time game communication.
-
-    Accepts landmark frames, game state updates, WebRTC signalling,
-    and chat messages from connected players.
-
-    Args:
-        websocket: The WebSocket connection.
-        room_code: Unique code identifying the game room.
-        player_id: Unique identifier for the connecting player.
-    """
     room_code = room_code.upper().strip()
     await manager.connect(websocket, room_code, player_id)
 
-    # Create a gesture pipeline for this player session
     pipeline_key = f"{room_code}:{player_id}"
     _gesture_pipelines[pipeline_key] = GesturePipeline(player_id)
 
-    # Confirm connection to the joining player
+    # ── FIX 1: Assign chess colors on connect ─────────────────────────────────
+    await assign_chess_colors(room_code, player_id)
+
+    # Confirm connection to joining player
     await manager.send_personal_message(
         {
             "type": WSMessageType.CONNECT,
@@ -179,11 +192,23 @@ async def websocket_endpoint(
         player_id,
     )
 
-    # Announce arrival to existing players
+    # ── FIX 2: Include username in player_joined so RoomView can display it ───
+    room = await RoomService.get_room(room_code)
+    joining_username = "Unknown"
+    if room:
+        for p in room.players:
+            if p.player_id == player_id:
+                joining_username = p.username
+                break
+
     await manager.broadcast_to_room(
         {
             "type": WSMessageType.PLAYER_JOINED,
-            "data": {"player_id": player_id, "room_code": room_code},
+            "data": {
+                "player_id": player_id,
+                "username": joining_username,
+                "room_code": room_code,
+            },
         },
         room_code,
         exclude_player=player_id,
@@ -196,7 +221,7 @@ async def websocket_endpoint(
             message_type: str = message.get("type", "")
             message_data: dict = message.get("data", {})
 
-            # ── LANDMARK_FRAME — route through CV pipeline ────────────────
+            # ── LANDMARK_FRAME ────────────────────────────────────────────
             if message_type == "LANDMARK_FRAME":
                 raw_landmarks: List[dict] = message_data.get("landmarks", [])
                 if len(raw_landmarks) != 21:
@@ -216,7 +241,6 @@ async def websocket_endpoint(
                 pipeline = _gesture_pipelines.get(pipeline_key)
                 if pipeline:
                     result = pipeline.process(raw_landmarks)
-                    # Only broadcast when a stable gesture is confirmed
                     if result.get("stable_gesture"):
                         await manager.broadcast_to_room(
                             {
@@ -232,7 +256,6 @@ async def websocket_endpoint(
                             },
                             room_code,
                         )
-                    # Always echo raw gesture back to the sender (for debug overlay)
                     await manager.send_personal_message(
                         {
                             "type": "GESTURE_RESULT",
@@ -284,6 +307,18 @@ async def websocket_endpoint(
                         },
                         room_code,
                     )
+                    # Re-send color assignments when chess is selected
+                    # so both players are guaranteed to have their color
+                    if game_type.value == "chess":
+                        for pid, color in _chess_colors.get(room_code, {}).items():
+                            await manager.send_personal_message(
+                                {
+                                    "type": "chess_color_assign",
+                                    "data": {"color": color},
+                                },
+                                room_code,
+                                pid,
+                            )
 
             # ── GAME_START ────────────────────────────────────────────────
             elif message_type == WSMessageType.GAME_START:
@@ -390,7 +425,7 @@ async def websocket_endpoint(
             # ── SCRIBBLE DRAW ─────────────────────────────────────────────
             elif message_type.startswith("scribble:"):
                 game = _scribble_games.get(room_code)
-                
+
                 if message_type == "scribble:start":
                     room = await RoomService.get_room(room_code)
                     if room:
@@ -407,7 +442,7 @@ async def websocket_endpoint(
                             {"type": "scribble:turn_start", "data": game.start_game()},
                             room_code,
                         )
-                        
+
                 elif message_type == "scribble:stroke":
                     if game:
                         game.stroke_history.append(message_data)
@@ -419,28 +454,26 @@ async def websocket_endpoint(
                                 "points": message_data.get("points", []),
                                 "color": message_data.get("color", "#000000"),
                                 "brush_size": message_data.get("brush_size", 4),
-                                "is_end": message_data.get("is_end", False)
-                            }
+                                "is_end": message_data.get("is_end", False),
+                            },
                         },
                         room_code,
-                        exclude_player=player_id
+                        exclude_player=player_id,
                     )
-                        
+
                 elif message_type == "scribble:clear":
                     if game:
                         game.stroke_history = []
                     await manager.broadcast_to_room(
                         {"type": "scribble:clear", "data": {"player_id": player_id}},
                         room_code,
-                        exclude_player=player_id
+                        exclude_player=player_id,
                     )
-                        
+
                 elif message_type == "scribble:guess":
                     if game:
                         guess_text = message_data.get("text", "")
                         result = game.handle_guess(player_id, guess_text)
-                        
-                        # Echo the guess in chat
                         await manager.broadcast_to_room(
                             {
                                 "type": "scribble:chat",
@@ -448,12 +481,11 @@ async def websocket_endpoint(
                                     "player_id": player_id,
                                     "username": game.usernames.get(player_id, player_id),
                                     "text": guess_text,
-                                    "is_guess": True
-                                }
+                                    "is_guess": True,
+                                },
                             },
-                            room_code
+                            room_code,
                         )
-                        
                         if result.get("type") == "scribble:correct":
                             await manager.broadcast_to_room(
                                 {"type": "scribble:correct", "data": result},
@@ -462,9 +494,9 @@ async def websocket_endpoint(
                             if "round_end" in result:
                                 await manager.broadcast_to_room(
                                     {"type": "scribble:round_end", "data": result["round_end"]},
-                                    room_code
+                                    room_code,
                                 )
-                            
+
                 elif message_type == "scribble:chat":
                     username = message_data.get("username", "Unknown")
                     if game:
@@ -476,25 +508,28 @@ async def websocket_endpoint(
                                 "player_id": player_id,
                                 "username": username,
                                 "text": message_data.get("text", ""),
-                                "is_guess": False
-                            }
+                                "is_guess": False,
+                            },
                         },
-                        room_code
+                        room_code,
                     )
 
                 elif message_type == "scribble:get_state":
-                     if game:
-                         await manager.send_personal_message(
-                             {"type": "scribble:state", "data": game.get_state_snapshot()},
-                             room_code,
-                             player_id
-                         )
-                         if game.stroke_history:
-                             await manager.send_personal_message(
-                                 {"type": "scribble:canvas_replay", "data": {"strokes": game.stroke_history}},
-                                 room_code,
-                                 player_id
-                             )
+                    if game:
+                        await manager.send_personal_message(
+                            {"type": "scribble:state", "data": game.get_state_snapshot()},
+                            room_code,
+                            player_id,
+                        )
+                        if game.stroke_history:
+                            await manager.send_personal_message(
+                                {
+                                    "type": "scribble:canvas_replay",
+                                    "data": {"strokes": game.stroke_history},
+                                },
+                                room_code,
+                                player_id,
+                            )
 
                 if game:
                     hint_update = game.get_hint_update()

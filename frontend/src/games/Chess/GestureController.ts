@@ -14,7 +14,20 @@ export interface GestureState {
     wrist: HandLandmark;
 }
 
+// ── Pinch thresholds with hysteresis ─────────────────────────────────────────
+// Enter pinch when dist < PINCH_ON, exit when dist > PINCH_OFF.
+// Hysteresis prevents rapid flickering at the boundary.
+// 0.05 was the old value — way too tight. Real pinches measure 0.06–0.12.
+const PINCH_ON = 0.08;  // fingers close enough → pinch starts
+const PINCH_OFF = 0.11;  // fingers must separate this far → pinch ends
 
+// Per-hand pinch state (module-level so it persists across calls)
+const _pinchState = new Map<string, boolean>();
+
+function getPinchKey(lm: HandLandmark[]): string {
+    // Use wrist position as a loose identity key (good enough for 1-2 hands)
+    return `${Math.round(lm[0].x * 10)}_${Math.round(lm[0].y * 10)}`;
+}
 
 function isFingerExtended(lm: HandLandmark[], tipIdx: number, pipIdx: number): boolean {
     if (tipIdx === 4) {
@@ -38,16 +51,23 @@ export function classifyGesture(lm: HandLandmark[]): GestureState {
     const pinkyExt = isFingerExtended(lm, 20, 18);
 
     const pinchDist = getPinchDistance(lm);
-    const isPinching = pinchDist < 0.05;
+
+    // Hysteresis: once pinching, stay pinching until fingers open past PINCH_OFF
+    const key = getPinchKey(lm);
+    const wasPinching = _pinchState.get(key) ?? false;
+    const isPinching = wasPinching
+        ? pinchDist < PINCH_OFF   // already pinching — need to open further to release
+        : pinchDist < PINCH_ON;   // not pinching — need to close to start
+    _pinchState.set(key, isPinching);
 
     let gesture: GestureType = 'none';
 
-    if (indexExt && middleExt && !ringExt && !pinkyExt) {
+    if (isPinching) {
+        gesture = 'pinch';
+    } else if (indexExt && middleExt && !ringExt && !pinkyExt) {
         gesture = 'peace';
     } else if (indexExt && !middleExt && !ringExt && !pinkyExt) {
-        gesture = isPinching ? 'pinch' : 'point';
-    } else if (isPinching) {
-        gesture = 'pinch';
+        gesture = 'point';
     } else if (indexExt && middleExt && ringExt && pinkyExt) {
         gesture = 'open_palm';
     }
@@ -63,6 +83,7 @@ export function classifyGesture(lm: HandLandmark[]): GestureState {
 }
 
 // ── Map normalized landmark to canvas pixel coords ────────────────────────────
+// mirror=true flips X to match the mirrored camera feed drawn on canvas
 export function landmarkToCanvas(
     lm: HandLandmark,
     canvasW: number,
@@ -76,7 +97,7 @@ export function landmarkToCanvas(
 }
 
 // ── Draw neon hand skeleton on canvas ────────────────────────────────────────
-const CONNECTIONS = [
+const CONNECTIONS: [number, number][] = [
     [0, 1], [1, 2], [2, 3], [3, 4],
     [0, 5], [5, 6], [6, 7], [7, 8],
     [0, 9], [9, 10], [10, 11], [11, 12],
@@ -91,13 +112,14 @@ export function drawHandSkeleton(
     W: number,
     H: number,
     isPinching: boolean
-) {
-    const pts = lm.map(l => landmarkToCanvas(l, W, H));
+): void {
+    const pts = lm.map(l => landmarkToCanvas(l, W, H)); // mirror=true by default
     const lineColor = isPinching ? '#FF6B35' : '#00E5FF';
     const glowColor = isPinching ? 'rgba(255,107,53,0.4)' : 'rgba(0,229,255,0.35)';
 
-    // Glow pass
     ctx.save();
+
+    // Glow pass
     ctx.strokeStyle = glowColor;
     ctx.lineWidth = 8;
     ctx.shadowColor = lineColor;
@@ -121,16 +143,14 @@ export function drawHandSkeleton(
     });
 
     // Landmark dots
-    lm.forEach((_, i) => {
-        const { x, y } = pts[i];
+    pts.forEach(({ x, y }, i) => {
         const r = i === 8 ? 10 : i === 4 ? 8 : 4;
         const color = i === 8 ? '#FFD700' : i === 4 ? '#FF6B35' : '#00E5FF';
-        ctx.beginPath(); ctx.arc(x, y, r + 4, 0, Math.PI * 2);
-        ctx.fillStyle = color.replace(')', ',0.3)').replace('rgb', 'rgba').replace('#', 'rgba(').replace('rgba(', 'rgba(');
-        // Simple glow ring
-        ctx.shadowColor = color; ctx.shadowBlur = 14;
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 14;
         ctx.fillStyle = color;
-        ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
         ctx.fill();
     });
 
@@ -140,33 +160,38 @@ export function drawHandSkeleton(
 // ── Draw fingertip cursor ─────────────────────────────────────────────────────
 export function drawCursor(
     ctx: CanvasRenderingContext2D,
-    x: number, y: number,
+    x: number,
+    y: number,
     isPinching: boolean,
-    dwellPct: number // 0-100
-) {
+    dwellPct: number  // 0–100, drives the hold-progress arc
+): void {
     ctx.save();
     const color = isPinching ? '#FF6B35' : '#FFD700';
     const r = isPinching ? 18 : 12;
 
     // Outer glow
-    ctx.shadowColor = color; ctx.shadowBlur = 24;
-    ctx.beginPath(); ctx.arc(x, y, r + 6, 0, Math.PI * 2);
-    ctx.fillStyle = color.replace('#', 'rgba(').replace('FFD700', '255,215,0,0.2)').replace('FF6B35', '255,107,53,0.2)');
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 24;
+    ctx.beginPath();
+    ctx.arc(x, y, r + 6, 0, Math.PI * 2);
+    ctx.fillStyle = isPinching ? 'rgba(255,107,53,0.2)' : 'rgba(255,215,0,0.2)';
     ctx.fill();
 
     // Core dot
     ctx.shadowBlur = 16;
-    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fillStyle = color;
     ctx.fill();
 
-    // Dwell ring
+    // Dwell progress ring
     if (dwellPct > 0) {
         ctx.beginPath();
         ctx.arc(x, y, r + 10, -Math.PI / 2, -Math.PI / 2 + (dwellPct / 100) * 2 * Math.PI);
         ctx.strokeStyle = '#FFD700';
         ctx.lineWidth = 3;
-        ctx.shadowColor = '#FFD700'; ctx.shadowBlur = 10;
+        ctx.shadowColor = '#FFD700';
+        ctx.shadowBlur = 10;
         ctx.stroke();
     }
 

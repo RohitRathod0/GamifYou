@@ -10,7 +10,6 @@
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Hands, Results } from '@mediapipe/hands';
-import { Camera } from '@mediapipe/camera_utils';
 import {
     classifyGesture, drawHandSkeleton,
     GestureState, HandLandmark,
@@ -56,18 +55,21 @@ interface ARChessGameProps {
     playerId: string;
     gameState?: any;
     onStateUpdate?: (s: any) => void;
-    /** Shared WebSocket sender from RoomView — avoids opening a duplicate WS */
+    /** Shared stream from RoomView — camera + mic already initialised */
+    localStream?: MediaStream | null;
+    /** Shared sendMessage from RoomView's useWebSocket — no second WS opened */
     sendMessage?: (type: string, data: any) => void;
 }
 
 interface ScreenPoint { x: number; y: number; }
 
-export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, onStateUpdate, sendMessage }) => {
+export const ARChessGame: React.FC<ARChessGameProps> = ({
+    playerId, gameState, onStateUpdate, localStream, sendMessage: sendWsMessage,
+}) => {
     // ── Refs ──────────────────────────────────────────────────────────────────
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const videoRef = useRef<HTMLVideoElement>(null);
     const handsRef = useRef<Hands | null>(null);
-    const camRef = useRef<Camera | null>(null);
     const rafRef = useRef<number>(0);
 
     // Game state refs
@@ -104,21 +106,57 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
     const [debugMode, setDebugMode] = useState(false);
     const [, setMyColor] = useState<PieceColor>('white');
 
-    // ── Colour bootstrap — applied from RoomView's gameState prop ────────────
-    // No separate WebSocket is opened here; the shared WS in RoomView handles
-    // chess_color_assign and game_state_update messages and forwards them via
-    // the gameState prop so this component stays stateless w.r.t. the socket.
+    const roomCode = gameState?.room_code || 'chess_room';
+
+    // ── Apply color from gameState prop (set by RoomView from server) ──────────
     useEffect(() => {
         if (gameState?.my_color) {
             myColorRef.current = gameState.my_color as PieceColor;
             setMyColor(gameState.my_color as PieceColor);
-        } else {
-            // Fallback before server assigns a color
-            const col: PieceColor = gameState?.player1_id === playerId ? 'white' : 'black';
-            myColorRef.current = col;
-            setMyColor(col);
         }
-    }, [gameState, playerId]);
+    }, [gameState?.my_color]);
+
+    // ── Also listen for synchronous CustomEvent from RoomView ─────────────────
+    // This fires BEFORE React re-renders so myColorRef is always fresh
+    // in the gesture processor. Fixes the stale 'white' bug on Device 2.
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const color = (e as CustomEvent).detail?.color as PieceColor;
+            if (color) {
+                myColorRef.current = color;
+                setMyColor(color);
+            }
+        };
+        window.addEventListener('chess_color_assign', handler);
+        return () => window.removeEventListener('chess_color_assign', handler);
+    }, []);
+
+    // ── FIX 1: React to incoming opponent moves via gameState.incomingState ──
+    // RoomView sets incomingState whenever it receives game_state_update from WS.
+    // We watch it here and apply to our board refs — no second WebSocket needed.
+    useEffect(() => {
+        const s = gameState?.incomingState;
+        if (!s) return;
+        if (s.chessBoard) boardRef.current = s.chessBoard;
+        if (s.currentTurn) currentTurnRef.current = s.currentTurn;
+        if (s.enPassantTarget !== undefined) epRef.current = s.enPassantTarget;
+        if (s.lastMove !== undefined) lastMoveRef.current = s.lastMove;
+        if (s.gameOver) { gameOverRef.current = s.gameOver; setGameOverState(s.gameOver); }
+        // Reset selection when opponent's move arrives
+        selectedRef.current = null;
+        validMovesRef.current = [];
+        aimedSquareRef.current = null;
+        phaseRef.current = 'IDLE';
+    }, [gameState?.incomingState]);
+
+    // ── FIX 2: Attach shared localStream to video element for camera feed ────
+    useEffect(() => {
+        if (!localStream || !videoRef.current) return;
+        if (videoRef.current.srcObject !== localStream) {
+            videoRef.current.srcObject = localStream;
+            videoRef.current.play().catch(console.error);
+        }
+    }, [localStream]);
 
     // ── Board layout helpers ──────────────────────────────────────────────────
     /** Compute stable layout (no float) — used for hit-testing */
@@ -151,37 +189,58 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
         return { x: x + dc * sqSize + sqSize / 2, y: y + dr * sqSize + sqSize / 2 };
     }, []);
 
-    // ── Cursor smoothing ──────────────────────────────────────────────────────
+    // ── Cursor smoothing — velocity-aware exponential smoothing ─────────────
+    // Quadratic weights on history so recent frames dominate.
+    // Alpha scales continuously with velocity so fast flicks feel snappy
+    // while slow deliberate positioning stays rock-solid on squares.
     const smoothCursor = useCallback((raw: ScreenPoint): ScreenPoint => {
         const hist = cursorHistRef.current;
         hist.push(raw);
         if (hist.length > CURSOR_HISTORY_SIZE) hist.shift();
 
+        // Quadratic recency weighting
         const w = hist.reduce((acc, p, i) => {
-            const wt = i + 1;
+            const wt = (i + 1) * (i + 1);
             acc.x += p.x * wt; acc.y += p.y * wt; acc.w += wt;
             return acc;
         }, { x: 0, y: 0, w: 0 });
-
         const avg = { x: w.x / w.w, y: w.y / w.w };
+
         const prev = cursorRef.current;
         if (!prev) return avg;
         const d = Math.hypot(avg.x - prev.x, avg.y - prev.y);
+
+        // Deadzone — kills micro-jitter when hand is still
         if (d < CURSOR_DEADZONE_PX) return prev;
-        const alpha = d > CURSOR_FAST_THRESHOLD_PX ? CURSOR_FAST_ALPHA : CURSOR_SLOW_ALPHA;
-        return { x: prev.x + (avg.x - prev.x) * alpha, y: prev.y + (avg.y - prev.y) * alpha };
+
+        // Continuous velocity → alpha mapping (quadratic ease-in)
+        const t = Math.min(d / CURSOR_FAST_THRESHOLD_PX, 1.5);
+        const alpha = Math.min(CURSOR_SLOW_ALPHA + (CURSOR_FAST_ALPHA - CURSOR_SLOW_ALPHA) * t * t, 0.85);
+
+        return {
+            x: prev.x + (avg.x - prev.x) * alpha,
+            y: prev.y + (avg.y - prev.y) * alpha,
+        };
     }, []);
 
-    /** Snap to nearest legal target with hysteresis */
+    /** Snap to nearest legal destination with hysteresis.
+     *  Only considers actual valid move squares — never the origin.
+     *  This fixes distant pieces (rook, queen, bishop, knight) where
+     *  the origin was always closest and snap never reached a destination.
+     */
     const snapToLegal = useCallback((cursor: ScreenPoint, from: Position, legal: Position[]): Position | null => {
-        const candidates = legal;
-        if (!candidates.length) return null;
-        let best = candidates[0];
+        if (!legal.length) return null;
+
+        // ONLY snap to actual destinations — never back to the from-square
+        let best = legal[0];
         let bestD = Infinity;
-        for (const c of candidates) {
-            const d = Math.hypot(cursor.x - squareCenter(c).x, cursor.y - squareCenter(c).y);
+        for (const c of legal) {
+            const center = squareCenter(c);
+            const d = Math.hypot(cursor.x - center.x, cursor.y - center.y);
             if (d < bestD) { best = c; bestD = d; }
         }
+
+        // Hysteresis: prefer previous aimed square if still close enough
         const prev = aimedSquareRef.current;
         if (prev && legal.some(m => m.row === prev.row && m.col === prev.col)) {
             const prevD = Math.hypot(cursor.x - squareCenter(prev).x, cursor.y - squareCenter(prev).y);
@@ -229,9 +288,8 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
 
         const ns = { chessBoard: nb, currentTurn: next, enPassantTarget: newEp, lastMove: { from, to } };
         onStateUpdate?.(ns);
-        // Use the shared sendMessage from RoomView — the WS is guaranteed OPEN
-        sendMessage?.('game_state_update', { state: ns });
-    }, [onStateUpdate, sendMessage]);
+        sendWsMessage?.('game_state_update', { state: ns });
+    }, [onStateUpdate, sendWsMessage]);
 
     // ── FIX 1 & 2: Gesture processor — called from MediaPipe onResults
     //   Uses refs only — no stale closures, never recreated ──────────────────
@@ -241,10 +299,12 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
         processGestureRef.current = (gs: GestureState, W: number, H: number) => {
             if (gameOverRef.current) return;
 
-            // FIX 3: mirror X because camera feed is flipped
-            const mirroredX = W - gs.indexTip.x * W;
-            const rawY = gs.indexTip.y * H;
-            const rawCursor = { x: mirroredX, y: rawY };
+            // Use landmarkToCanvas for consistent mirroring with the skeleton
+            // landmarkToCanvas(mirror=true) = (1 - lm.x) * W, same as what skeleton uses
+            const rawCursor = {
+                x: (1 - gs.indexTip.x) * W,
+                y: gs.indexTip.y * H,
+            };
 
             const cursor = smoothCursor(rawCursor);
             cursorRef.current = cursor;
@@ -268,10 +328,9 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
                 }
             }
 
-            // ── HOLDING phase — counting toward 1s select ─────────────────────
+            // ── HOLDING phase — counting toward 0.4s select ─────────────────
             if (phase === 'HOLDING') {
                 if (!isPinching) {
-                    // Released before 1s — treat as quick-pinch, but nothing selected yet → cancel
                     phaseRef.current = 'IDLE';
                     holdProgressRef.current = 0;
                     pinchStartTimeRef.current = 0;
@@ -280,11 +339,21 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
                     holdProgressRef.current = Math.min(elapsed / HOLD_SELECT_MS, 1);
 
                     if (elapsed >= HOLD_SELECT_MS) {
-                        // ✅ 1 second held — SELECT if valid piece
-                        if (sq
-                            && myColorRef.current === currentTurnRef.current
-                            && boardRef.current[sq.row]?.[sq.col]?.color === myColorRef.current
-                        ) {
+                        // Read myColor fresh — prop may have arrived after gesture loop started
+                        // FIX: never rely on stale 'white' default — read from board piece color
+                        const myColor = myColorRef.current;
+                        const piece = sq ? boardRef.current[sq.row]?.[sq.col] : null;
+
+                        // ✅ Allow selection if:
+                        //   a) it's my turn AND the piece is mine, OR
+                        //   b) debug: piece exists and is same color as current turn (handles stale myColor)
+                        const isMyPiece = piece && (
+                            piece.color === myColor ||
+                            piece.color === currentTurnRef.current  // fallback if myColor is stale
+                        );
+                        const isMyTurn = myColor === currentTurnRef.current;
+
+                        if (sq && isMyPiece && isMyTurn) {
                             selectedRef.current = sq;
                             validMovesRef.current = getLegalMoves(boardRef.current, sq, epRef.current);
                             aimedSquareRef.current = null;
@@ -752,21 +821,34 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
 
         handsRef.current = hands;
 
-        if (videoRef.current) {
-            const cam = new Camera(videoRef.current, {
-                onFrame: async () => {
-                    if (videoRef.current && handsRef.current)
-                        await handsRef.current.send({ image: videoRef.current });
-                },
-                width: 1280, height: 720,
-            });
-            cam.start()
-                .then(() => setHandReady(true))
-                .catch(() => setCamError(true));
-            camRef.current = cam;
+        // FIX 2+3: Do NOT call cam.start() — that calls getUserMedia internally
+        // and would create a second stream without audio.
+        // Instead run our own rAF loop against the videoRef that already has
+        // the shared localStream attached (via the localStream useEffect above).
+        let frameLoopRunning = true;
+        const frameLoop = async () => {
+            if (!frameLoopRunning) return;
+            const video = videoRef.current;
+            if (video && handsRef.current && video.readyState >= 2 && !video.paused) {
+                await handsRef.current.send({ image: video });
+            }
+            requestAnimationFrame(frameLoop);
+        };
+        // Wait for video to be ready before starting loop
+        const startLoop = () => {
+            setHandReady(true);
+            frameLoop();
+        };
+        if (videoRef.current && videoRef.current.readyState >= 2) {
+            startLoop();
+        } else if (videoRef.current) {
+            videoRef.current.addEventListener('loadeddata', startLoop, { once: true });
         }
 
-        return () => { hands.close(); camRef.current?.stop(); };
+        return () => {
+            frameLoopRunning = false;
+            hands.close();
+        };
     }, []); // ✅ Empty deps — MediaPipe never restarts
 
     // ── Render loop ───────────────────────────────────────────────────────────
@@ -800,7 +882,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({ playerId, gameState, o
         phaseRef.current = 'IDLE';
         const ns = { chessBoard: nb, currentTurn: next, enPassantTarget: null, lastMove: lastMoveRef.current };
         onStateUpdate?.(ns);
-        sendMessage?.('game_state_update', { state: ns });
+        sendWsMessage?.('game_state_update', { state: ns });
     };
 
     // ── JSX ───────────────────────────────────────────────────────────────────

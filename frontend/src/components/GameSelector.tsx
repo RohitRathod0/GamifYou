@@ -6,7 +6,6 @@ import { FacePuzzle } from '@/games/FacePuzzle';
 import { ScribbleDraw } from '@/games/ScribbleDraw';
 import { GAMES } from '@/utils/constants';
 import { HandTrackingData } from '@/hooks/useHandTracking';
-
 import { GameState } from '@/types';
 
 interface GameSelectorProps {
@@ -16,7 +15,11 @@ interface GameSelectorProps {
     playerId?: string;
     gameState?: GameState;
     onStateUpdate?: (state: Partial<GameState>) => void;
-    sendMessage?: (type: string, data: Record<string, unknown>) => void;
+    /** Shared WebSocket sender — passed through to whichever game needs it */
+    sendMessage?: (type: string, data: any) => void;
+    /** Shared camera+mic stream — forwarded to ARChessGame so it never
+     *  calls getUserMedia a second time (fixes camera-black + mic-silent bugs) */
+    localStream?: MediaStream | null;
 }
 
 export const GameSelector: React.FC<GameSelectorProps> = ({
@@ -26,7 +29,8 @@ export const GameSelector: React.FC<GameSelectorProps> = ({
     playerId = '',
     gameState = {},
     onStateUpdate = () => { },
-    sendMessage = () => { }
+    sendMessage = () => { },
+    localStream,
 }) => {
     switch (game) {
         case GAMES.AIR_HOCKEY:
@@ -52,6 +56,8 @@ export const GameSelector: React.FC<GameSelectorProps> = ({
                     playerId={playerId}
                     gameState={gameState}
                     onStateUpdate={onStateUpdate}
+                    sendMessage={sendMessage}
+                    localStream={localStream}   // ← critical: shared stream for MediaPipe
                 />
             );
         case GAMES.FACE_PUZZLE:

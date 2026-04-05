@@ -30,8 +30,7 @@ const CURSOR_FAST_THRESHOLD_PX = 28;
 const SNAP_HYSTERESIS_PX = 24;
 
 // Hold-pinch timing
-const HOLD_SELECT_MS = 400;    // hold pinch 400ms → SELECT piece (feels natural)
-const QUICK_PINCH_MAX_MS = 600; // pinch released in <600ms → CONFIRM move (forgiving window)
+const HOLD_SELECT_MS = 400;    // hold pinch 400ms → SELECT piece
 
 // Board colors
 const LIGHT_SQ = 'rgba(232, 244, 252, 0.72)';
@@ -288,144 +287,125 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
 
         const ns = { chessBoard: nb, currentTurn: next, enPassantTarget: newEp, lastMove: { from, to } };
         onStateUpdate?.(ns);
-        sendWsMessage?.('game_state_update', { state: ns });
-    }, [onStateUpdate, sendWsMessage]);
+        // Include playerId so RoomView knows this update came from US and
+        // can skip applying it to our own board (prevents echo loop)
+        sendWsMessage?.('game_state_update', { state: ns, player_id: playerId });
+    }, [onStateUpdate, sendWsMessage, playerId]);
 
-    // ── FIX 1 & 2: Gesture processor — called from MediaPipe onResults
-    //   Uses refs only — no stale closures, never recreated ──────────────────
+    // ── Gesture processor ─────────────────────────────────────────────────────
+    // Called every MediaPipe frame. Runs entirely via refs — no stale closures.
+    // ─────────────────────────────────────────────────────────────────────────
     const processGestureRef = useRef<(gs: GestureState, W: number, H: number) => void>(() => { });
 
     useEffect(() => {
         processGestureRef.current = (gs: GestureState, W: number, H: number) => {
             if (gameOverRef.current) return;
 
-            // Use landmarkToCanvas for consistent mirroring with the skeleton
-            // landmarkToCanvas(mirror=true) = (1 - lm.x) * W, same as what skeleton uses
-            const rawCursor = {
-                x: (1 - gs.indexTip.x) * W,
-                y: gs.indexTip.y * H,
-            };
-
+            // Mirror X to match the flipped camera feed drawn on canvas
+            const rawCursor = { x: (1 - gs.indexTip.x) * W, y: gs.indexTip.y * H };
             const cursor = smoothCursor(rawCursor);
             cursorRef.current = cursor;
-            const sq = screenToSquare(cursor.x, cursor.y);
-            const now = performance.now();
-            const isPinching = gs.isPinching;
+
+            const sq        = screenToSquare(cursor.x, cursor.y);
+            const now       = performance.now();
+            const isPinching  = gs.isPinching;
             const wasPinching = prevPinchRef.current;
-            const pinchStarted = isPinching && !wasPinching;
-            const pinchEnded = !isPinching && wasPinching;
-            const phase = phaseRef.current;
+            const pinchStarted = isPinching && !wasPinching;   // rising edge
+            // falling edge (we do NOT use pinchEnded for move confirmation anymore)
 
-            // ── IDLE phase ────────────────────────────────────────────────────
-            if (phase === 'IDLE' || phase === 'COOLDOWN') {
+            // ── IDLE / COOLDOWN ──────────────────────────────────────────────
+            if (phaseRef.current === 'IDLE' || phaseRef.current === 'COOLDOWN') {
                 aimedSquareRef.current = null;
-
-                if (pinchStarted && phase === 'IDLE') {
-                    // Start hold timer
+                if (pinchStarted && phaseRef.current === 'IDLE') {
                     pinchStartTimeRef.current = now;
-                    holdProgressRef.current = 0;
+                    holdProgressRef.current   = 0;
                     phaseRef.current = 'HOLDING';
                 }
             }
 
-            // ── HOLDING phase — counting toward 0.4s select ─────────────────
-            if (phase === 'HOLDING') {
+            // ── HOLDING — count to HOLD_SELECT_MS ───────────────────────────
+            // NOTE: use phaseRef.current (live), not the stale `phase` snapshot,
+            // so this block runs even in the same frame we transitioned from IDLE.
+            if (phaseRef.current === 'HOLDING') {
                 if (!isPinching) {
-                    phaseRef.current = 'IDLE';
-                    holdProgressRef.current = 0;
+                    // Released too early — cancel
+                    phaseRef.current      = 'IDLE';
+                    holdProgressRef.current   = 0;
                     pinchStartTimeRef.current = 0;
                 } else {
                     const elapsed = now - pinchStartTimeRef.current;
                     holdProgressRef.current = Math.min(elapsed / HOLD_SELECT_MS, 1);
 
                     if (elapsed >= HOLD_SELECT_MS) {
-                        // Read myColor fresh — prop may have arrived after gesture loop started
-                        // FIX: never rely on stale 'white' default — read from board piece color
-                        const myColor = myColorRef.current;
-                        const piece = sq ? boardRef.current[sq.row]?.[sq.col] : null;
+                        // Timer complete — try to select the piece under the cursor
+                        const myColor  = myColorRef.current;
+                        const piece    = sq ? boardRef.current[sq.row]?.[sq.col] : null;
+                        const isMyTurn  = myColor === currentTurnRef.current;
+                        const isMyPiece = piece?.color === myColor;
 
-                        // ✅ Allow selection if:
-                        //   a) it's my turn AND the piece is mine, OR
-                        //   b) debug: piece exists and is same color as current turn (handles stale myColor)
-                        const isMyPiece = piece && (
-                            piece.color === myColor ||
-                            piece.color === currentTurnRef.current  // fallback if myColor is stale
-                        );
-                        const isMyTurn = myColor === currentTurnRef.current;
-
-                        if (sq && isMyPiece && isMyTurn) {
-                            selectedRef.current = sq;
-                            validMovesRef.current = getLegalMoves(boardRef.current, sq, epRef.current);
+                        if (sq && isMyTurn && isMyPiece) {
+                            selectedRef.current    = sq;
+                            validMovesRef.current  = getLegalMoves(boardRef.current, sq, epRef.current);
                             aimedSquareRef.current = null;
-                            phaseRef.current = 'SELECTED';
+                            phaseRef.current       = 'SELECTED';
                         } else {
-                            phaseRef.current = 'IDLE';
+                            phaseRef.current = 'IDLE'; // wrong piece / not our turn
                         }
-                        holdProgressRef.current = 0;
+                        holdProgressRef.current   = 0;
                         pinchStartTimeRef.current = 0;
                     }
                 }
             }
 
-            // ── SELECTED phase — piece chosen, aiming at destination ──────────
-            if (phase === 'SELECTED') {
-                // Update aimed square continuously
+            // ── SELECTED — piece chosen, user aims then pinches to confirm ───
+            // KEY DESIGN: NO timer here. Just:
+            //   • Update aimed square every frame
+            //   • pinchStarted on a legal square   → EXECUTE MOVE
+            //   • pinchStarted on an illegal square → DESELECT
+            //   • peace gesture                     → DESELECT
+            //
+            // We intentionally ignore the first release (the end of the
+            // hold-select gesture) by only acting on pinch STARTS, not ends.
+            // Since the user was already pinching when we entered SELECTED,
+            // pinchStarted will be false until they fully release and re-pinch.
+            if (phaseRef.current === 'SELECTED') {
                 const legal = validMovesRef.current;
+
+                // Always update aimed square so the blue highlight follows the cursor
                 const aimed = snapToLegal(cursor, selectedRef.current!, legal);
                 aimedSquareRef.current = aimed ?? null;
 
                 if (pinchStarted) {
-                    // Always reset timer on a fresh pinch edge
-                    pinchStartTimeRef.current = now;
-                }
+                    // Check aimed first (snap result), then raw sq under cursor
+                    const isAimedLegal = aimed && legal.some(m => m.row === aimed.row && m.col === aimed.col);
+                    const isSqLegal    = sq    && legal.some(m => m.row === sq.row    && m.col === sq.col);
 
-                // Guard: if phase entered while already pinching, timer would be 0 — fix it
-                if (isPinching && pinchStartTimeRef.current === 0) {
-                    pinchStartTimeRef.current = now;
-                }
-
-                if (pinchEnded) {
-                    // If timer was never set treat as instant quick-pinch (0ms held)
-                    const heldMs = pinchStartTimeRef.current > 0
-                        ? now - pinchStartTimeRef.current
-                        : 0;
-
-                    const isQuickPinch = heldMs < QUICK_PINCH_MAX_MS;
-                    const isLongHold = heldMs >= HOLD_SELECT_MS;
-
-                    if (isQuickPinch) {
-                        // ✅ Quick-pinch: CONFIRM move
-                        // Prefer snapped aimed square, fall back to sq directly under cursor
-                        const target = (aimed && legal.some(m => m.row === aimed.row && m.col === aimed.col))
-                            ? aimed
-                            : (sq && legal.some(m => m.row === sq.row && m.col === sq.col))
-                                ? sq
-                                : null;
-
-                        if (target) {
-                            doMove(selectedRef.current!, target);
-                        } else {
-                            // Pinched on invalid square → deselect
-                            selectedRef.current = null;
-                            validMovesRef.current = [];
-                            aimedSquareRef.current = null;
-                            phaseRef.current = 'IDLE';
-                        }
-                    } else if (isLongHold) {
-                        // Long hold while selected → CANCEL selection
-                        selectedRef.current = null;
-                        validMovesRef.current = [];
+                    if (isAimedLegal) {
+                        doMove(selectedRef.current!, aimed!);
+                    } else if (isSqLegal) {
+                        doMove(selectedRef.current!, sq!);
+                    } else {
+                        // Pinched on a non-legal square → cancel selection
+                        selectedRef.current    = null;
+                        validMovesRef.current  = [];
                         aimedSquareRef.current = null;
-                        phaseRef.current = 'IDLE';
+                        phaseRef.current       = 'IDLE';
                     }
-                    // Gray zone (400–600ms): do nothing, stay in SELECTED
-                    pinchStartTimeRef.current = 0;
+                }
+
+                // ✌️ Peace sign → cancel selection (escape hatch)
+                if (gs.gesture === 'peace') {
+                    selectedRef.current    = null;
+                    validMovesRef.current  = [];
+                    aimedSquareRef.current = null;
+                    phaseRef.current       = 'IDLE';
                 }
             }
 
             prevPinchRef.current = isPinching;
         };
-    }); // no deps — always uses latest refs
+    }); // no deps — always captures latest refs/callbacks
+
 
     // ── Draw a single frame ───────────────────────────────────────────────────
     const drawFrame = useCallback(() => {
@@ -672,7 +652,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
                     // Hint if it's player's piece and their turn
                     if (hovPiece.color === myCol && myCol === currentTurnRef.current) {
                         ctx.fillStyle = '#00E5FF'; ctx.font = '11px "Segoe UI"'; ctx.textBaseline = 'top';
-                        ctx.fillText('Hold pinch 1s to select', ttX + 12, ttY + 36);
+                        ctx.fillText('Hold pinch 0.4s to select → pinch on blue dot to move', ttX + 12, ttY + 36);
                     }
                     ctx.restore();
                 }
@@ -740,7 +720,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
         }
 
         // ── Gesture hints ─────────────────────────────────────────────────────
-        const hints = ['🖐 Hold pinch 0.4s = select piece', '🤌 Quick pinch on green dot = move', '✌️ Peace sign = reset'];
+        const hints = ['🖐 Hold pinch 0.4s = SELECT piece', '🤌 Pinch on blue dot = MOVE piece', '✌️ Peace sign = cancel selection'];
         ctx.save();
         ctx.font = '12px "Segoe UI"'; ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(255,255,255,0.45)';
         hints.forEach((h, i) => ctx.fillText(h, W - 16, H - 70 + i * 18));
@@ -882,7 +862,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
         phaseRef.current = 'IDLE';
         const ns = { chessBoard: nb, currentTurn: next, enPassantTarget: null, lastMove: lastMoveRef.current };
         onStateUpdate?.(ns);
-        sendWsMessage?.('game_state_update', { state: ns });
+        sendWsMessage?.('game_state_update', { state: ns, player_id: playerId });
     };
 
     // ── JSX ───────────────────────────────────────────────────────────────────

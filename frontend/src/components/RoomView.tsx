@@ -112,11 +112,10 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                     window.dispatchEvent(new CustomEvent('chess_color_assign', { detail: { color: data.color } }));
                     break;
 
-                // FIX 1: opponent move — forward to ARChessGame via prop
+                // Opponent's move — backend already excludes sender, so every
+                // message here is from a different player. Apply directly.
                 case 'game_state_update':
-                    if (data.player_id !== playerId) {
-                        setIncomingChessState({ ...data.state, _ts: Date.now() });
-                    }
+                    setIncomingChessState({ ...data.state, _ts: Date.now() });
                     break;
 
                 case 'webrtc_offer': handleOffer(data.from_player_id, data.offer); break;

@@ -29,8 +29,7 @@ const CURSOR_FAST_ALPHA = 0.42;
 const CURSOR_FAST_THRESHOLD_PX = 28;
 const SNAP_HYSTERESIS_PX = 24;
 
-// Hold-pinch timing
-const HOLD_SELECT_MS = 400;    // hold pinch 400ms → SELECT piece
+const HOLD_SELECT_MS  = 400;  // dwell 400ms to SELECT or MOVE
 
 // Board colors
 const LIGHT_SQ = 'rgba(232, 244, 252, 0.72)';
@@ -83,15 +82,16 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
     const moveHistRef = useRef<string[]>([]);
 
     // Gesture / interaction refs
-    const gestureRef       = useRef<GestureState | null>(null);
-    const cursorRef        = useRef<ScreenPoint | null>(null);
-    const cursorHistRef    = useRef<ScreenPoint[]>([]);
-    const phaseRef         = useRef<GesturePhase>('IDLE');
-    // Dwell tracking — used for both select (IDLE) and move (SELECTED)
-    const dwellSquareRef   = useRef<Position | null>(null);  // square currently being dwelled on
-    const dwellStartRef    = useRef<number>(0);              // timestamp dwell began
-    const dwellProgressRef = useRef<number>(0);              // 0–1 visual progress
-    const aimedSquareRef   = useRef<Position | null>(null);  // legal destination being aimed at
+    const gestureRef        = useRef<GestureState | null>(null);
+    const cursorRef         = useRef<ScreenPoint | null>(null);
+    const cursorHistRef     = useRef<ScreenPoint[]>([]);
+    const phaseRef          = useRef<GesturePhase>('IDLE');
+    // Dwell tracking (position-deadzone method — robust to finger jitter)
+    const dwellStartRef     = useRef<number>(0);                // timestamp dwell began
+    const dwellSquareRef    = useRef<Position | null>(null);    // board square captured at dwell-start
+    const dwellProgressRef  = useRef<number>(0);                // 0–1 visual progress
+    const aimedSquareRef    = useRef<Position | null>(null);    // legal destination cursor is over
+    const holdProgressRef   = useRef<number>(0);                // alias kept for debug overlay compat
 
     // FIX 4: stable board layout for hit-testing (no float offset)
     const stableBoardRef = useRef({ x: 0, y: 0, sqSize: 0, totalSize: 0 });
@@ -304,6 +304,12 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
         processGestureRef.current = (gs: GestureState, W: number, H: number) => {
             if (gameOverRef.current) return;
 
+            // ── CRITICAL FIX: ensure board layout is computed before any hit-testing ──
+            // drawFrame runs on its own RAF loop. MediaPipe fires onResults from a
+            // different RAF loop. If MediaPipe fires first, stableBoardRef is still
+            // {x:0,y:0,sqSize:0} → screenToSquare always returns null → dwell never starts.
+            computeStableLayout(W, H);
+
             // Mirror X to match the flipped camera feed drawn on canvas
             const rawCursor = { x: (1 - gs.indexTip.x) * W, y: gs.indexTip.y * H };
             const cursor = smoothCursor(rawCursor);
@@ -327,11 +333,16 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
                 // Hovering same square — accumulate
                 const elapsed = now - dwellStartRef.current;
                 dwellProgressRef.current = Math.min(elapsed / HOLD_SELECT_MS, 1);
+                holdProgressRef.current  = dwellProgressRef.current; // keep alias in sync
             }
 
             const dwellElapsed = (sq && sameSq) ? (now - dwellStartRef.current) : 0;
 
             // ── IDLE ─────────────────────────────────────────────────────────
+            // CRITICAL: must be else-if chain — only one phase block runs per frame.
+            // If IDLE fires and sets phaseRef='SELECTED', the SELECTED block must NOT
+            // also fire in the same frame (dwellElapsed is still the old 400ms value
+            // which would immediately trigger isSamePiece → deselect).
             if (phaseRef.current === 'IDLE') {
                 aimedSquareRef.current = null;
 
@@ -350,13 +361,13 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
                         dwellSquareRef.current   = null;
                         dwellStartRef.current    = 0;
                         dwellProgressRef.current = 0;
+                        holdProgressRef.current  = 0;
                     }
                     // else: hovered over wrong piece / empty / opponent — ignore
                 }
-            }
 
             // ── SELECTED ─────────────────────────────────────────────────────
-            if (phaseRef.current === 'SELECTED') {
+            } else if (phaseRef.current === 'SELECTED') {
                 const legal = validMovesRef.current;
 
                 // Update aimed square continuously (blue snapping highlight follows cursor)
@@ -374,6 +385,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
                         dwellSquareRef.current   = null;
                         dwellStartRef.current    = 0;
                         dwellProgressRef.current = 0;
+                        holdProgressRef.current  = 0;
                     } else if (isSamePiece) {
                         // Re-dwell on the selected piece → DESELECT
                         selectedRef.current    = null;
@@ -383,15 +395,16 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
                         dwellSquareRef.current   = null;
                         dwellStartRef.current    = 0;
                         dwellProgressRef.current = 0;
+                        holdProgressRef.current  = 0;
                     }
                     // else: dwell on empty / opponent square — stay SELECTED, let user aim elsewhere
                 }
-            }
 
             // ── COOLDOWN ─────────────────────────────────────────────────────
-            if (phaseRef.current === 'COOLDOWN') {
+            } else if (phaseRef.current === 'COOLDOWN') {
                 aimedSquareRef.current   = null;
                 dwellProgressRef.current = 0;
+                holdProgressRef.current  = 0;
             }
         };
     }); // no deps — always captures latest refs/callbacks
@@ -727,18 +740,19 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
         // ── Debug overlay ─────────────────────────────────────────────────────
         if (debugMode) {
             ctx.save();
-            ctx.fillStyle = 'rgba(0,0,0,0.75)'; ctx.fillRect(10, 10, 320, 140);
+            ctx.fillStyle = 'rgba(0,0,0,0.75)'; ctx.fillRect(10, 10, 320, 160);
             ctx.fillStyle = 'cyan'; ctx.font = '13px monospace'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
             ctx.fillText(`Phase: ${phase}`, 20, 20);
-            ctx.fillText(`Pinching: ${gs?.isPinching ?? false}`, 20, 38);
-            ctx.fillText(`Hold progress: ${Math.round((holdProgressRef.current ?? 0) * 100)}%`, 20, 56);
+            ctx.fillText(`Gesture: ${gs?.gesture ?? 'none'}`, 20, 38);
+            ctx.fillText(`Dwell progress: ${Math.round(dwellProgressRef.current * 100)}%`, 20, 56);
+            ctx.fillText(`Board sqSize: ${stableBoardRef.current.sqSize}px`, 20, 74);
             if (cursorPt) {
                 const hSq = screenToSquare(cursorPt.x, cursorPt.y);
-                ctx.fillText(`Cursor: x=${Math.round(cursorPt.x)} y=${Math.round(cursorPt.y)}`, 20, 74);
-                ctx.fillText(`Square: r=${hSq?.row ?? 'N/A'} c=${hSq?.col ?? 'N/A'}`, 20, 92);
+                ctx.fillText(`Cursor: x=${Math.round(cursorPt.x)} y=${Math.round(cursorPt.y)}`, 20, 92);
+                ctx.fillText(`Square: r=${hSq?.row ?? 'N/A'} c=${hSq?.col ?? 'N/A'}`, 20, 110);
             }
-            if (sel) ctx.fillText(`Selected: r${sel.row} c${sel.col} (${validMovesRef.current.length} moves)`, 20, 110);
-            if (aimed) ctx.fillText(`Aimed: r${aimed.row} c${aimed.col}`, 20, 128);
+            if (sel) ctx.fillText(`Selected: r${sel.row} c${sel.col} (${validMovesRef.current.length} moves)`, 20, 128);
+            if (aimed) ctx.fillText(`Aimed: r${aimed.row} c${aimed.col}`, 20, 146);
             ctx.restore();
         }
     }, [computeStableLayout, screenToSquare, debugMode]);
@@ -776,15 +790,17 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
             let best: { gs: GestureState; score: number } | null = null;
             for (const lm of results.multiHandLandmarks) {
                 const gs = classifyGesture(lm as HandLandmark[]);
-                // FIX 3: mirror X for cursor position scoring
+                // Mirror X for cursor position scoring (matches mirrored canvas)
                 const cx = W - gs.indexTip.x * W;
                 const cy = gs.indexTip.y * H;
                 const sq = screenToSquare(cx, cy);
+                // Dwell mode: prefer index-pointing hands that are over the board.
+                // No pinch bonus — pinching is irrelevant in dwell mode.
                 let score = 0;
-                if (gs.isPinching) score += 120;
-                if (gs.gesture === 'point') score += 70;
-                if (sq) score += 35;
-                score -= Math.hypot(cx - bx, cy - by) / 25;
+                if (gs.gesture === 'point') score += 100;   // strongly prefer pointing
+                else if (gs.gesture === 'peace') score += 40; // peace is also usable
+                if (sq) score += 50;                         // bonus if over the board
+                score -= Math.hypot(cx - bx, cy - by) / 20; // prefer hand near board
                 if (!best || score > best.score) best = { gs, score };
             }
 
@@ -925,7 +941,10 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
                             gameOverRef.current = null; epRef.current = null;
                             lastMoveRef.current = null; capturedRef.current = { white: [], black: [] };
                             moveHistRef.current = []; aimedSquareRef.current = null;
-                            phaseRef.current = 'IDLE'; holdProgressRef.current = 0;
+                            phaseRef.current = 'IDLE';
+                            dwellSquareRef.current = null; dwellStartRef.current = 0;
+                            dwellProgressRef.current = 0; holdProgressRef.current = 0;
+                            cursorHistRef.current = [];
                             setGameOverState(null);
                         }} style={{ padding: '14px 40px', fontSize: '1.1rem', background: 'linear-gradient(135deg,#00BCD4,#0097A7)', color: '#000', border: 'none', borderRadius: 30, cursor: 'pointer', fontWeight: 800, boxShadow: '0 4px 20px rgba(0,188,212,0.4)' }}>
                             ▶ Play Again

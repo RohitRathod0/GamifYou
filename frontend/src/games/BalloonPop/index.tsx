@@ -1,9 +1,8 @@
 import { useEffect, useRef } from 'react';
-import { HandTrackingData } from '@/hooks/useHandTracking';
+import { useHandTracking } from '@/hooks/useHandTracking';
 
 interface BalloonPopProps {
-    trackingData: HandTrackingData;
-    trackingDataRef?: React.MutableRefObject<HandTrackingData>;
+    localStream?: MediaStream | null;
     playerId: string;
     gameState: any;
     onStateUpdate: (state: any) => void;
@@ -11,12 +10,13 @@ interface BalloonPopProps {
 
 
 export const BalloonPop: React.FC<BalloonPopProps> = ({
-    trackingData,
-    trackingDataRef,
+    localStream,
     playerId: _playerId,
     gameState: _gameState,
     onStateUpdate: _onStateUpdate,
 }) => {
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const { trackingData, trackingDataRef } = useHandTracking(videoRef, localStream);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const animationRef = useRef<number>();
 
@@ -39,8 +39,8 @@ export const BalloonPop: React.FC<BalloonPopProps> = ({
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
             // Draw hand tracking position
-            const currentData = trackingDataRef?.current || trackingData;
-            if (currentData.landmarks[0]) {
+            const currentData = trackingDataRef.current || trackingData;
+            if (currentData?.landmarks?.[0]) {
                 const palm = currentData.landmarks[0][9];
                 ctx.fillStyle = '#00ff00';
                 ctx.beginPath();
@@ -72,6 +72,7 @@ export const BalloonPop: React.FC<BalloonPopProps> = ({
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '20px' }}>
+            <video ref={videoRef} autoPlay playsInline muted style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', width: 1, height: 1 }} />
             <h2>Balloon Pop</h2>
             <canvas
                 ref={canvasRef}

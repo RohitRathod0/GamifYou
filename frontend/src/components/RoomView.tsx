@@ -3,7 +3,7 @@ import { useWebSocket } from '@/hooks/useWebSocket';
 import { useWebRTC } from '@/hooks/useWebRTC';
 import { VideoFeed } from '@/components/VideoFeed';
 import { GameSelector } from '@/components/GameSelector';
-import { HandTrackingData } from '@/hooks/useHandTracking';
+// removed HandTrackingData import
 
 interface RoomViewProps {
     appState: any;
@@ -16,23 +16,13 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
     const remoteVideoRef = useRef<HTMLVideoElement>(null);
     const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
 
-    // FIX 1: chess color from server, not hardcoded
     const [myChessColor, setMyChessColor] = useState<'white' | 'black' | null>(null);
     const [whitePlayerId, setWhitePlayerId] = useState<string | null>(null);
-
-    // FIX 1: incoming opponent move state — passed down to ARChessGame
     const [incomingChessState, setIncomingChessState] = useState<any>(null);
 
     const [isMicMuted, setIsMicMuted] = useState(false);
     const [videoEnabled, setVideoEnabled] = useState(true);
-
-    // FIX 2+3: ONE shared stream — feeds VideoFeed, WebRTC, and ARChessGame camera
     const [localStream, setLocalStream] = useState<MediaStream | null>(null);
-
-    const [externalTrackingData, setExternalTrackingData] = useState<HandTrackingData>(
-        { landmarks: [], handedness: [] }
-    );
-    const externalTrackingDataRef = useRef<React.MutableRefObject<HandTrackingData> | undefined>(undefined);
 
     const [notifications, setNotifications] = useState<{ id: number; msg: string }[]>([]);
     const notifCounter = useRef(0);
@@ -43,10 +33,31 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
         setTimeout(() => setNotifications(prev => prev.filter(n => n.id !== id)), 4000);
     }, []);
 
-    // Track peer IDs that arrived before our stream was ready
     const pendingOffersRef = useRef<string[]>([]);
 
-    // FIX 2+3: get camera + mic ONCE here, share to everything
+    // ── Back-button interception ───────────────────────────────────────────────
+    // When a game starts, push a dummy history entry. Browser "Back" fires
+    // popstate — we intercept it and clear currentGame (stay in /room) instead
+    // of letting the router navigate away to /lobby.
+    useEffect(() => {
+        if (currentGame) {
+            window.history.pushState({ inGame: true, game: currentGame }, '');
+        }
+    }, [currentGame]);
+
+    useEffect(() => {
+        const handlePopState = (e: PopStateEvent) => {
+            if (e.state?.inGame) {
+                // Stay in /room — just clear the active game
+                setAppState((prev: any) => ({ ...prev, currentGame: null }));
+            }
+        };
+        window.addEventListener('popstate', handlePopState);
+        return () => window.removeEventListener('popstate', handlePopState);
+    }, [setAppState]);
+    // ──────────────────────────────────────────────────────────────────────────
+
+    // Get camera + mic ONCE, share everywhere
     useEffect(() => {
         let mounted = true;
         navigator.mediaDevices
@@ -59,9 +70,6 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
         return () => { mounted = false; };
     }, []);
 
-    // FIX 4 (one-way video): once stream arrives, retry any offers that were
-    // queued before the stream was ready — this is the race condition that
-    // causes Device 1 camera to never reach Device 2.
     useEffect(() => {
         if (!localStream || pendingOffersRef.current.length === 0) return;
         const pending = [...pendingOffersRef.current];
@@ -78,7 +86,6 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
         localStream.getVideoTracks().forEach(t => { t.enabled = videoEnabled; });
     }, [localStream, videoEnabled]);
 
-    // Single WebSocket for signaling + game state
     const { sendMessage } = useWebSocket({
         roomCode,
         playerId,
@@ -88,13 +95,10 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
             switch (type) {
                 case 'player_joined':
                     showNotification(`${data.username || 'A player'} joined!`);
-                    // FIX 4 (one-way video): if our stream isn't ready yet,
-                    // queue the offer — the useEffect above retries it once ready
                     if (localStream) {
                         createOffer(data.player_id);
                     } else {
                         pendingOffersRef.current.push(data.player_id);
-                        console.log('[WebRTC] Stream not ready, queuing offer for', data.player_id);
                     }
                     break;
                 case 'player_left':
@@ -102,18 +106,18 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                     closePeerConnection(data.player_id);
                     break;
 
-                // FIX 1: color assigned by server on connect
+                // Only fires after chess is selected (not on connect)
                 case 'chess_color_assign':
                     setMyChessColor(data.color);
                     if (data.color === 'white') setWhitePlayerId(playerId);
                     showNotification(`You are ${data.color === 'white' ? '⬜ White' : '⬛ Black'}`);
-                    // Dispatch synchronous DOM event so ARChessGame can update
-                    // myColorRef immediately — before next React render cycle
                     window.dispatchEvent(new CustomEvent('chess_color_assign', { detail: { color: data.color } }));
                     break;
 
-                // Opponent's move — backend already excludes sender, so every
-                // message here is from a different player. Apply directly.
+                case 'chess_color_clear':
+                    setMyChessColor(null);
+                    break;
+
                 case 'game_state_update':
                     setIncomingChessState({ ...data.state, _ts: Date.now() });
                     break;
@@ -133,7 +137,6 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
             }
         });
 
-    // FIX 2: set remote video srcObject safely after mount
     useEffect(() => {
         if (remoteStreams.size === 0 || !remoteVideoRef.current) return;
         const stream = Array.from(remoteStreams.values())[0];
@@ -146,7 +149,6 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
         });
     }, [remoteStreams]);
 
-    // FIX 3: mic toggle mutes BOTH local track and WebRTC sender
     const toggleMic = useCallback(() => {
         const next = !isMicMuted;
         setIsMicMuted(next);
@@ -154,8 +156,13 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
         localStream?.getAudioTracks().forEach(t => { t.enabled = !next; });
     }, [isMicMuted, setMicEnabled, localStream]);
 
+    // Leave active game → return to game picker (stay in /room)
+    const handleLeaveGame = useCallback(() => {
+        setAppState((prev: any) => ({ ...prev, currentGame: null }));
+    }, [setAppState]);
+
     return (
-        <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', height: '100%' }}>
+        <div style={{ padding: currentGame ? 0 : '20px', display: 'flex', flexDirection: 'column', height: '100%' }}>
 
             {/* Toasts */}
             <div style={{ position: 'fixed', top: 20, left: '50%', transform: 'translateX(-50%)', zIndex: 9999, display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -166,30 +173,28 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                 ))}
             </div>
 
-            {/* Header */}
-            <div style={{ marginBottom: 20, textAlign: 'center' }}>
-                <h2>Room: {roomCode}</h2>
-                <div style={{ display: 'flex', justifyContent: 'center', gap: 8, fontSize: '0.9rem', color: '#aaa', margin: '4px 0' }}>
-                    <span>{username}</span>
-                    {myChessColor && (<><span>•</span><span style={{ color: myChessColor === 'white' ? '#fff' : '#aaa', fontWeight: 700 }}>{myChessColor === 'white' ? '⬜ White' : '⬛ Black'}</span></>)}
+            {/* Header — unmounted while a game is active */}
+            {!currentGame && (
+                <div style={{ marginBottom: 20, textAlign: 'center' }}>
+                    <h2>Room: {roomCode}</h2>
+                    <div style={{ display: 'flex', justifyContent: 'center', gap: 8, fontSize: '0.9rem', color: '#aaa', margin: '4px 0' }}>
+                        <span>{username}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'center', gap: 10, marginTop: 10 }}>
+                        <button onClick={toggleMic} style={{ padding: '8px 16px', borderRadius: 20, border: 'none', background: isMicMuted ? '#ef4444' : '#3b82f6', color: '#fff', cursor: 'pointer' }}>
+                            {isMicMuted ? '🔇 Mic Off' : '🎤 Mic On'}
+                        </button>
+                        <button onClick={() => setVideoEnabled(v => !v)} style={{ padding: '8px 16px', borderRadius: 20, border: 'none', background: videoEnabled ? '#3b82f6' : '#ef4444', color: '#fff', cursor: 'pointer' }}>
+                            {videoEnabled ? '📷 Cam On' : '🚫 Cam Off'}
+                        </button>
+                    </div>
                 </div>
-                <div style={{ display: 'flex', justifyContent: 'center', gap: 10, marginTop: 10 }}>
-                    <button onClick={toggleMic} style={{ padding: '8px 16px', borderRadius: 20, border: 'none', background: isMicMuted ? '#ef4444' : '#3b82f6', color: '#fff', cursor: 'pointer' }}>
-                        {isMicMuted ? '🔇 Mic Off' : '🎤 Mic On'}
-                    </button>
-                    <button onClick={() => setVideoEnabled(v => !v)} style={{ padding: '8px 16px', borderRadius: 20, border: 'none', background: videoEnabled ? '#3b82f6' : '#ef4444', color: '#fff', cursor: 'pointer' }}>
-                        {videoEnabled ? '📷 Cam On' : '🚫 Cam Off'}
-                    </button>
-                </div>
-            </div>
+            )}
 
-            {/* FIX 2: VideoFeed uses shared localStream */}
-            <VideoFeed localStream={localStream} onTrackingData={(data, dataRef) => {
-                setExternalTrackingData(data);
-                externalTrackingDataRef.current = dataRef;
-            }} />
+            {/* Local Video Feed — Always visible in top right */}
+            <VideoFeed localStream={localStream} />
 
-            {/* Remote video PiP */}
+            {/* Remote video PiP — shown during games too */}
             {remoteStreams.size > 0 && (
                 <div style={{ position: 'fixed', bottom: 20, left: 20, zIndex: 1000, width: 320, height: 240, borderRadius: 12, overflow: 'hidden', boxShadow: '0 8px 32px rgba(0,0,0,0.5)', border: '2px solid #3b82f6', background: '#000' }}>
                     <video ref={remoteVideoRef} autoPlay playsInline style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
@@ -203,20 +208,33 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
             {/* Game area */}
             {currentGame ? (
                 <div style={{ flex: 1, position: 'relative' }}>
+                    {/* ← Games button — fixed overlay so it's always reachable */}
+                    <button
+                        onClick={handleLeaveGame}
+                        style={{
+                            position: 'fixed', top: 16, left: 16, zIndex: 500,
+                            padding: '8px 18px', borderRadius: 20, border: 'none',
+                            background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(8px)',
+                            color: '#fff', fontSize: 14, fontWeight: 700,
+                            cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+                            boxShadow: '0 2px 12px rgba(0,0,0,0.5)',
+                            letterSpacing: '0.02em',
+                        }}
+                    >
+                        ← Games
+                    </button>
                     <GameSelector
                         game={currentGame}
-                        trackingData={externalTrackingData}
-                        trackingDataRef={externalTrackingDataRef.current}
                         playerId={playerId}
                         gameState={{
                             player1_id: whitePlayerId ?? playerId,
                             my_color: myChessColor ?? 'white',
-                            room_code: roomCode,                // FIX 4: correct room
-                            incomingState: incomingChessState,  // FIX 1: opponent moves
+                            room_code: roomCode,
+                            incomingState: incomingChessState,
                         }}
-                        localStream={localStream}               // FIX 2: shared camera
+                        localStream={localStream}
                         onStateUpdate={() => { }}
-                        sendMessage={sendMessage}               // FIX 1: shared WS
+                        sendMessage={sendMessage}
                     />
                 </div>
             ) : (
@@ -230,7 +248,11 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                             { type: 'scribble', label: '✏️ Scribble Draw', color: '#F59E0B' },
                             { type: 'face_puzzle', label: '🧩 Face Puzzle', color: '#9C27B0' },
                         ].map(({ type, label, color }) => (
-                            <button key={type} onClick={() => { sendMessage('game_selected', { game_type: type }); setAppState({ ...appState, currentGame: type }); }}
+                            <button key={type}
+                                onClick={() => {
+                                    sendMessage('game_selected', { game_type: type });
+                                    setAppState({ ...appState, currentGame: type });
+                                }}
                                 style={{ padding: '20px 40px', fontSize: '1.1rem', backgroundColor: color, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 'bold' }}>
                                 {label}
                             </button>

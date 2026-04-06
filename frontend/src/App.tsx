@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { Lobby } from '@/components/Lobby';
 import { RoomView } from '@/components/RoomView';
@@ -12,13 +12,33 @@ export interface AppState {
     currentGame: string | null;
 }
 
+const SESSION_KEY = 'gesturehub_session';
+
+/** Read persisted session — currentGame is always cleared on reload
+ *  (camera + WS need to reinitialize; user lands on game picker instead). */
+function loadSession(): AppState {
+    try {
+        const raw = sessionStorage.getItem(SESSION_KEY);
+        if (raw) {
+            const saved = JSON.parse(raw) as AppState;
+            return { ...saved, currentGame: null }; // never restore mid-game state
+        }
+    } catch { /* ignore corrupt data */ }
+    return { username: '', roomCode: '', playerId: '', currentGame: null };
+}
+
 function App() {
-    const [appState, setAppState] = useState<AppState>({
-        username: '',
-        roomCode: '',
-        playerId: '',
-        currentGame: null,
-    });
+    const [appState, setAppState] = useState<AppState>(loadSession);
+
+    // Persist session on every state change
+    useEffect(() => {
+        if (appState.roomCode) {
+            sessionStorage.setItem(SESSION_KEY, JSON.stringify(appState));
+        } else {
+            // Cleared room (e.g. left lobby) — remove saved session
+            sessionStorage.removeItem(SESSION_KEY);
+        }
+    }, [appState]);
 
     return (
         <Router>
@@ -58,4 +78,4 @@ function App() {
     );
 }
 
-export default App;
+export default App;

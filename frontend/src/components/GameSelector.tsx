@@ -5,27 +5,22 @@ import { ARChessGame } from '@/games/Chess/ARChessGame';
 import { FacePuzzle } from '@/games/FacePuzzle';
 import { ScribbleDraw } from '@/games/ScribbleDraw';
 import { GAMES } from '@/utils/constants';
-import { HandTrackingData } from '@/hooks/useHandTracking';
 import { GameState } from '@/types';
 
 interface GameSelectorProps {
     game: string;
-    trackingData?: HandTrackingData;
-    trackingDataRef?: React.MutableRefObject<HandTrackingData>;
     playerId?: string;
     gameState?: GameState;
     onStateUpdate?: (state: Partial<GameState>) => void;
     /** Shared WebSocket sender — passed through to whichever game needs it */
     sendMessage?: (type: string, data: any) => void;
-    /** Shared camera+mic stream — forwarded to ARChessGame so it never
-     *  calls getUserMedia a second time (fixes camera-black + mic-silent bugs) */
+    /** Shared camera+mic stream — forwarded to games so they never
+     *  call getUserMedia a second time (fixes camera-black + mic-silent bugs) */
     localStream?: MediaStream | null;
 }
 
 export const GameSelector: React.FC<GameSelectorProps> = ({
     game,
-    trackingData = { landmarks: [], handedness: [] },
-    trackingDataRef,
     playerId = '',
     gameState = {},
     onStateUpdate = () => { },
@@ -35,16 +30,12 @@ export const GameSelector: React.FC<GameSelectorProps> = ({
     switch (game) {
         case GAMES.AIR_HOCKEY:
             return (
-                <AirHockey
-                    trackingData={trackingData}
-                    trackingDataRef={trackingDataRef}
-                />
+                <AirHockey localStream={localStream} />
             );
         case GAMES.BALLOON_POP:
             return (
                 <BalloonPop
-                    trackingData={trackingData}
-                    trackingDataRef={trackingDataRef}
+                    localStream={localStream}
                     playerId={playerId}
                     gameState={gameState}
                     onStateUpdate={onStateUpdate}
@@ -57,22 +48,20 @@ export const GameSelector: React.FC<GameSelectorProps> = ({
                     gameState={gameState}
                     onStateUpdate={onStateUpdate}
                     sendMessage={sendMessage}
-                    localStream={localStream}   // ← critical: shared stream for MediaPipe
+                    localStream={localStream}
                 />
             );
         case GAMES.FACE_PUZZLE:
             return (
                 <FacePuzzle
-                    trackingData={trackingData}
-                    trackingDataRef={trackingDataRef}
+                    localStream={localStream}
                     playerId={playerId}
                 />
             );
         case 'scribble':
             return (
                 <ScribbleDraw
-                    trackingData={trackingData}
-                    trackingDataRef={trackingDataRef}
+                    localStream={localStream}
                     playerId={playerId}
                     sendMessage={sendMessage}
                 />

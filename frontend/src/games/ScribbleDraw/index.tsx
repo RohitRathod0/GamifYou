@@ -1,24 +1,26 @@
-import React, { useEffect, useState } from 'react';
-import { HandTrackingData } from '@/hooks/useHandTracking';
+import React, { useEffect, useState, useRef } from 'react';
 import { DrawerView } from './DrawerView';
 import { GuesserView } from './GuesserView';
 import { ScribbleHUD } from './ScribbleHUD';
 import { ScribbleChat, ChatMessage } from './ScribbleChat';
 import { StrokeData } from './useFingerDraw';
 
+import { useHandTracking } from '@/hooks/useHandTracking';
+
 interface ScribbleDrawProps {
-    trackingData: HandTrackingData;
-    trackingDataRef?: React.MutableRefObject<HandTrackingData>;
+    localStream?: MediaStream | null;
     playerId: string;
     sendMessage: (type: string, data: any) => void;
-} // Removed roomCode, appState, scribbleMessage as they were not used
+}
 
 export const ScribbleDraw: React.FC<ScribbleDrawProps> = ({
-    trackingData,
-    trackingDataRef,
+    localStream,
     playerId,
     sendMessage
 }) => {
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const { trackingData, trackingDataRef } = useHandTracking(videoRef, localStream);
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const [gameState, setGameState] = useState<any>(null);
     const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -127,6 +129,7 @@ export const ScribbleDraw: React.FC<ScribbleDrawProps> = ({
 
     return (
         <div style={{ display: 'flex', gap: '20px', padding: '20px', justifyContent: 'center', alignItems: 'flex-start' }}>
+            <video ref={videoRef} autoPlay playsInline muted style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', width: 1, height: 1 }} />
             {gameState ? (
                 <>
                     <ScribbleHUD 

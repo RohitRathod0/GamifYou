@@ -175,9 +175,6 @@ async def websocket_endpoint(
     pipeline_key = f"{room_code}:{player_id}"
     _gesture_pipelines[pipeline_key] = GesturePipeline(player_id)
 
-    # ── FIX 1: Assign chess colors on connect ─────────────────────────────────
-    await assign_chess_colors(room_code, player_id)
-
     # Confirm connection to joining player
     await manager.send_personal_message(
         {
@@ -307,18 +304,21 @@ async def websocket_endpoint(
                         },
                         room_code,
                     )
-                    # Re-send color assignments when chess is selected
-                    # so both players are guaranteed to have their color
+                    # Assign (or re-assign) chess colors only when chess is chosen
                     if game_type.value == "chess":
-                        for pid, color in _chess_colors.get(room_code, {}).items():
-                            await manager.send_personal_message(
-                                {
-                                    "type": "chess_color_assign",
-                                    "data": {"color": color},
-                                },
-                                room_code,
-                                pid,
-                            )
+                        # Clear stale colors from a prior chess session in this room
+                        _chess_colors.pop(room_code, None)
+                        # Assign colors to every currently-connected player in join order
+                        for pid in list(manager.active_connections.get(room_code, {}).keys()):
+                            await assign_chess_colors(room_code, pid)
+                    else:
+                        # Non-chess game selected — clear any chess colors so the
+                        # frontend doesn't keep showing the chess color badge
+                        _chess_colors.pop(room_code, None)
+                        await manager.broadcast_to_room(
+                            {"type": "chess_color_clear", "data": {}},
+                            room_code,
+                        )
 
             # ── GAME_START ────────────────────────────────────────────────
             elif message_type == WSMessageType.GAME_START:

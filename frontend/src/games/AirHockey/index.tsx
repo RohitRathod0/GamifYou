@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { HandTrackingData } from '@/hooks/useHandTracking';
+import { useHandTracking } from '@/hooks/useHandTracking';
 
 interface AirHockeyProps {
-    trackingData: HandTrackingData;
-    trackingDataRef?: React.MutableRefObject<HandTrackingData>;
+    localStream?: MediaStream | null;
 }
 
 interface Paddle {
@@ -25,9 +24,10 @@ interface Puck {
 }
 
 export const AirHockey: React.FC<AirHockeyProps> = ({
-    trackingData,
-    trackingDataRef,
+    localStream,
 }) => {
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const { trackingData, trackingDataRef } = useHandTracking(videoRef, localStream);
     const canvasRef = useRef<HTMLCanvasElement>(null);
 
     // Hand-to-paddle assignment tracking (locks hands to specific paddles)
@@ -81,7 +81,7 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
             lastTime = currentTime;
 
             // --- Tracking Update ---
-            const currentData = trackingDataRef?.current || trackingData;
+            const currentData = trackingDataRef.current || trackingData;
             if (currentData.landmarks && currentData.landmarks.length > 0) {
                 const currentHandCount = currentData.landmarks.length;
 
@@ -268,10 +268,11 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
                 cancelAnimationFrame(animationRef.current);
             }
         };
-    }, [score1, score2]); // Removed paddle1, paddle2, puck from dependencies
+    }, [score1, score2, trackingData, trackingDataRef]); // Removed paddle1, paddle2, puck from dependencies
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '20px' }}>
+            <video ref={videoRef} autoPlay playsInline muted style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', width: 1, height: 1 }} />
             <div style={{
                 background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
                 padding: '20px',
@@ -307,9 +308,9 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
                     🔵 Blue Paddle (Bottom): Second hand detected
                 </p>
                 <p style={{ marginTop: '10px', fontSize: '0.8rem', color: '#aaa' }}>
-                    {trackingData.landmarks.length === 2
+                    {trackingData?.landmarks?.length === 2
                         ? '✅ Both paddles active! Play together!'
-                        : trackingData.landmarks.length === 1
+                        : trackingData?.landmarks?.length === 1
                             ? '👋 Show second hand to activate blue paddle'
                             : '⏳ Show hands to start playing'}
                 </p>

@@ -250,6 +250,7 @@ class ScribbleGame:
             "word_length": len(self.current_word),
             "word_hint": self.word_hint,
             "scores": dict(self.scores),
+            "time_left": self.round_duration,
         }
 
     def _end_round(self) -> dict:

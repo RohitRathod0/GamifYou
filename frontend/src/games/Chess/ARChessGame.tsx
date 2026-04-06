@@ -99,15 +99,10 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
     const floatRef = useRef({ t: 0 });
 
     const [handReady, setHandReady] = useState(false);
-    const [camError, setCamError] = useState(false);
     const [promotionPending, setPromotionPending] = useState<{ pos: Position; color: PieceColor } | null>(null);
     const [gameOverState, setGameOverState] = useState<{ winner: string; reason: string } | null>(null);
     const [debugMode, setDebugMode] = useState(false);
     const [, setMyColor] = useState<PieceColor>('white');
-
-    const roomCode = gameState?.room_code || 'chess_room';
-
-    // ── Apply color from gameState prop (set by RoomView from server) ──────────
     useEffect(() => {
         if (gameState?.my_color) {
             myColorRef.current = gameState.my_color as PieceColor;
@@ -198,7 +193,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
         if (hist.length > CURSOR_HISTORY_SIZE) hist.shift();
 
         // Quadratic recency weighting
-        const w = hist.reduce((acc, p, i) => {
+        const w = hist.reduce((acc: { x: number; y: number; w: number }, p, i) => {
             const wt = (i + 1) * (i + 1);
             acc.x += p.x * wt; acc.y += p.y * wt; acc.w += wt;
             return acc;
@@ -227,7 +222,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
      *  This fixes distant pieces (rook, queen, bishop, knight) where
      *  the origin was always closest and snap never reached a destination.
      */
-    const snapToLegal = useCallback((cursor: ScreenPoint, from: Position, legal: Position[]): Position | null => {
+    const snapToLegal = useCallback((cursor: ScreenPoint, legal: Position[]): Position | null => {
         if (!legal.length) return null;
 
         // ONLY snap to actual destinations — never back to the from-square
@@ -371,7 +366,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
                 const legal = validMovesRef.current;
 
                 // Update aimed square continuously (blue snapping highlight follows cursor)
-                const aimed = snapToLegal(cursor, selectedRef.current!, legal);
+                const aimed = snapToLegal(cursor, legal);
                 aimedSquareRef.current = aimed ?? null;
 
                 if (sq && dwellElapsed >= HOLD_SELECT_MS) {
@@ -478,13 +473,13 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
                 if (aimed?.row === row && aimed?.col === col && phase === 'SELECTED')
                     fillColor = AIM_SQ;
 
-                // Hover (yellow) — only in IDLE/HOLDING
+                // Hover (yellow) — only in IDLE
                 let isHovered = false;
-                if (cursorPt && (phase === 'IDLE' || phase === 'HOLDING' || phase === 'SELECTED')) {
+                if (cursorPt && (phase === 'IDLE' || phase === 'SELECTED')) {
                     const hSq = screenToSquare(cursorPt.x, cursorPt.y);
                     if (hSq?.row === row && hSq?.col === col) {
                         isHovered = true;
-                        if (phase === 'IDLE' || phase === 'HOLDING') fillColor = HOVER_SQ;
+                        if (phase === 'IDLE') fillColor = HOVER_SQ;
                     }
                 }
 
@@ -492,7 +487,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
                 ctx.fillRect(sx, sy, sqSize, sqSize);
 
                 // Hover border + notation
-                if (isHovered && (phase === 'IDLE' || phase === 'HOLDING')) {
+                if (isHovered && phase === 'IDLE') {
                     ctx.save();
                     ctx.strokeStyle = '#FFFF00'; ctx.lineWidth = 4;
                     ctx.shadowColor = '#FFFF00'; ctx.shadowBlur = 14;
@@ -689,7 +684,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
         const tw = ctx.measureText(statusText).width;
         ctx.fillStyle = 'rgba(0,0,0,0.65)';
         ctx.beginPath(); ctx.roundRect(W / 2 - tw / 2 - 18, 12, tw + 36, 36, 18); ctx.fill();
-        ctx.fillStyle = inChk ? '#FF6B6B' : (phase === 'SELECTED' ? '#00AAFF' : phase === 'HOLDING' ? '#00FF88' : myColorRef.current === currentTurnRef.current ? '#00E5FF' : '#aaa');
+        ctx.fillStyle = inChk ? '#FF6B6B' : (phase === 'SELECTED' ? '#00AAFF' : myColorRef.current === currentTurnRef.current ? '#00E5FF' : '#aaa');
         ctx.fillText(statusText, W / 2, 30);
         ctx.restore();
 
@@ -887,7 +882,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
             <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: '100%' }} />
 
             {/* Loading */}
-            {!handReady && !camError && (
+            {!handReady && (
                 <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.85)', color: '#fff', fontFamily: "'Segoe UI',sans-serif", zIndex: 10 }}>
                     <div style={{ width: 60, height: 60, border: '4px solid #333', borderTop: '4px solid #00E5FF', borderRadius: '50%', animation: 'spin 1s linear infinite', marginBottom: 24 }} />
                     <h2 style={{ margin: '0 0 8px', color: '#00E5FF' }}>Loading AR Chess</h2>
@@ -896,14 +891,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
                 </div>
             )}
 
-            {/* Camera error */}
-            {camError && (
-                <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.9)', color: '#fff', zIndex: 10 }}>
-                    <div style={{ fontSize: 64, marginBottom: 16 }}>📷</div>
-                    <h2 style={{ color: '#f44336', margin: '0 0 8px' }}>Camera Required</h2>
-                    <p style={{ color: '#aaa' }}>Allow camera access and refresh.</p>
-                </div>
-            )}
+
 
             {/* Debug button */}
             <button onClick={() => setDebugMode(d => !d)} style={{ position: 'absolute', top: 20, right: 20, zIndex: 100, padding: '8px 16px', borderRadius: '20px', border: 'none', cursor: 'pointer', background: debugMode ? '#F44336' : 'rgba(255,255,255,0.15)', color: '#fff', fontSize: '13px', fontWeight: 700, backdropFilter: 'blur(4px)' }}>

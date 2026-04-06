@@ -13,7 +13,7 @@
  */
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { HandTrackingData } from '@/hooks/useHandTracking';
+import { useHandTracking } from '@/hooks/useHandTracking';
 import { drawHandSkeleton, landmarkToCanvas, HandLandmark } from '../Chess/GestureController';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -75,16 +75,17 @@ function slideTile(tiles: number[], tr: number, tc: number): number[] | null {
 }
 
 // ── Props / types ─────────────────────────────────────────────────────────────
-interface FacePuzzleProps { trackingData: HandTrackingData; trackingDataRef?: React.MutableRefObject<HandTrackingData>; playerId?: string; }
+interface FacePuzzleProps { localStream?: MediaStream | null; playerId?: string; }
 interface SwipeOrigin { x: number; y: number; row: number; col: number; }
 interface Anim { tile: number; fromI: number; toI: number; start: number; }
 interface BBox { minX: number; minY: number; maxX: number; maxY: number; }
 
 // ── Component ─────────────────────────────────────────────────────────────────
-export const FacePuzzle: React.FC<FacePuzzleProps> = ({ trackingData, trackingDataRef }) => {
+export const FacePuzzle: React.FC<FacePuzzleProps> = ({ localStream }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const videoRef = useRef<HTMLVideoElement>(null);
     const rafRef = useRef<number>(0);
+    const { trackingData, trackingDataRef } = useHandTracking(videoRef, localStream);
     const streamRef = useRef<MediaStream | null>(null);
 
     // ── Game state refs ───────────────────────────────────────────────────────

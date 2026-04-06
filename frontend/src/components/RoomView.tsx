@@ -194,6 +194,12 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                     handleLeaveGame();
                     showNotification('Voice: Leaving game.');
                     break;
+                case 'CHESS_MOVE':
+                    if (currentGame === 'chess') {
+                        window.dispatchEvent(new CustomEvent('chess_voice_move', { detail: result.action }));
+                        showNotification(`Voice: ♟️ ${result.action.from} → ${result.action.to}`);
+                    }
+                    break;
                 default:
                     if (currentGame) {
                         window.dispatchEvent(new CustomEvent('voice_command_raw', { detail: result }));

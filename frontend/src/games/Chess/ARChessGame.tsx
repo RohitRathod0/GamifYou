@@ -287,6 +287,45 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
         sendWsMessage?.('game_state_update', { state: ns, player_id: playerId });
     }, [onStateUpdate, sendWsMessage, playerId]);
 
+    // ── Voice Command Listener ────────────────────────────────────────────────
+    useEffect(() => {
+        const handleVoiceMove = (e: Event) => {
+            const action = (e as CustomEvent).detail as { from: string; to: string };
+            if (!action || !action.from || !action.to) return;
+            
+            // "b2" -> row: 6, col: 1
+            const parseCoord = (coord: string) => {
+                const col = coord.charCodeAt(0) - 97; // 'a' -> 0
+                const row = 8 - parseInt(coord[1]);    // '1' -> 7, '8' -> 0
+                return { row, col };
+            };
+            
+            const fromPos = parseCoord(action.from);
+            const toPos = parseCoord(action.to);
+            
+            // Validate before making move
+            const board = boardRef.current;
+            const piece = board[fromPos.row][fromPos.col];
+            
+            if (!piece || piece.color !== myColorRef.current || myColorRef.current !== currentTurnRef.current) {
+                console.warn("[Voice] Move invalid: Not your piece or turn!");
+                return;
+            }
+            
+            const legalMoves = getLegalMoves(boardRef.current, fromPos, epRef.current);
+            const isLegal = legalMoves.some(m => m.row === toPos.row && m.col === toPos.col);
+            
+            if (isLegal) {
+                doMove(fromPos, toPos);
+            } else {
+                console.warn(`[Voice] Move ${action.from} -> ${action.to} is technically illegal on the board!`);
+            }
+        };
+
+        window.addEventListener('chess_voice_move', handleVoiceMove);
+        return () => window.removeEventListener('chess_voice_move', handleVoiceMove);
+    }, [doMove]);
+
     // ── Gesture processor ─────────────────────────────────────────────────────
     // Pure point/dwell control — NO pinching needed:
     //   IDLE:     point at YOUR piece and hold still 0.4s → piece SELECTED

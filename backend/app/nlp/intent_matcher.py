@@ -15,6 +15,7 @@ CHANGE_BG       = "CHANGE_BG"
 MUTE_MIC        = "MUTE_MIC"
 UNMUTE_MIC      = "UNMUTE_MIC"
 LEAVE_GAME      = "LEAVE_GAME"
+CHESS_MOVE      = "CHESS_MOVE"
 UNKNOWN         = "UNKNOWN"
 
 # ── Game aliases ─────────────────────────────────────────────────────────────
@@ -81,6 +82,28 @@ class IntentResult:
     confidence: float          # 0.0–1.0
     action:     dict = field(default_factory=dict)
 
+def extract_chess_move(text: str) -> dict | None:
+    text = text.lower()
+    # Replace common phonetic mistakes and punctuation
+    replacements = {
+        ",": " ", ".": " ", "-": " ", " to ": " ", " takes ": " ", " capture ": " ", " captures ": " ", " move ": " ", " play ": " ",
+        "see": "c", "sea": "c", "she": "c", "bee": "b", "be": "b", "me": "b", "we": "b",
+        "dee": "d", "the": "d", "deep": "d", "if": "f", "eff": "f", "off": "f", "half": "f",
+        "gee": "g", "je": "g", "age": "h", "edge": "h", "each": "h", "eight": "8", "one": "1", "two": "2", "too": "2", "three": "3",
+        "four": "4", "for": "4", "five": "5", "six": "6", "seven": "7"
+    }
+    for k, v in replacements.items():
+        text = text.replace(k, v)
+        
+    # Look for two valid algebraic coordinates (e.g. "b 2", "b2", "b  2")
+    coords = re.findall(r'\b([a-h])\s*([1-8])\b', text)
+    if len(coords) >= 2:
+        return {
+            "from": f"{coords[0][0]}{coords[0][1]}",
+            "to": f"{coords[1][0]}{coords[1][1]}"
+        }
+    return None
+
 
 def match_intent(text: str) -> IntentResult:
     """Parse a raw Whisper transcript into a structured intent."""
@@ -135,5 +158,10 @@ def match_intent(text: str) -> IntentResult:
     # 5. LEAVE_GAME
     if _LEAVE_PATTERNS.search(text_lower):
         return IntentResult(intent=LEAVE_GAME, confidence=0.82, action={})
+
+    # 6. CHESS_MOVE 
+    chess_action = extract_chess_move(text_lower)
+    if chess_action:
+        return IntentResult(intent=CHESS_MOVE, confidence=0.90, action=chess_action)
 
     return IntentResult(intent=UNKNOWN, confidence=0.0, action={})

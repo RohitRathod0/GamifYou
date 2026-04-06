@@ -54,4 +54,18 @@ export const roomAPI = {
     },
 };
 
+export const voiceAPI = {
+    sendCommand: async (audioBlob: Blob): Promise<any> => {
+        const formData = new FormData();
+        formData.append('audio', audioBlob, 'command.webm');
+
+        const response = await api.post('/api/voice/command', formData, {
+            headers: {
+                'Content-Type': 'multipart/form-data',
+            },
+        });
+        return response.data;
+    },
+};
+
 export default api;

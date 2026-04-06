@@ -5,6 +5,7 @@ import { VideoFeed } from '@/components/VideoFeed';
 import { GameSelector } from '@/components/GameSelector';
 import { BackgroundConfig } from '@/components/Background/types';
 import { VirtualBgPanel } from '@/components/VirtualBgPanel';
+import { useVoiceCommand } from '@/hooks/useVoiceCommand';
 // removed HandTrackingData import
 
 interface RoomViewProps {
@@ -32,6 +33,8 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
 
     const [notifications, setNotifications] = useState<{ id: number; msg: string }[]>([]);
     const notifCounter = useRef(0);
+
+    // Wait to define hook until callback is defined to avoid dependency issues
 
     const showNotification = useCallback((msg: string) => {
         const id = notifCounter.current++;
@@ -167,6 +170,43 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
         setAppState((prev: any) => ({ ...prev, currentGame: null }));
     }, [setAppState]);
 
+    const handleVoiceIntent = useCallback((result: any) => {
+        if (result && result.intent) {
+            switch (result.intent) {
+                case 'START_GAME':
+                    sendMessage('game_selected', { game_type: result.action.game_type });
+                    setAppState((prev: any) => ({ ...prev, currentGame: result.action.game_type }));
+                    showNotification(`Voice: Starting game!`);
+                    break;
+                case 'CHANGE_BG':
+                    setBgConfig(result.action.bgConfig);
+                    showNotification('Voice: Changing background...');
+                    break;
+                case 'MUTE_MIC':
+                    if (!isMicMuted) toggleMic();
+                    showNotification('Voice: Microphone muted.');
+                    break;
+                case 'UNMUTE_MIC':
+                    if (isMicMuted) toggleMic();
+                    showNotification('Voice: Microphone unmuted.');
+                    break;
+                case 'LEAVE_GAME':
+                    handleLeaveGame();
+                    showNotification('Voice: Leaving game.');
+                    break;
+                default:
+                    if (currentGame) {
+                        window.dispatchEvent(new CustomEvent('voice_command_raw', { detail: result }));
+                        showNotification(`🎧 "${result.text}"`);
+                    } else {
+                        showNotification(`Voice: Could not process "${result.text}"`);
+                    }
+            }
+        }
+    }, [setAppState, sendMessage, showNotification, isMicMuted, toggleMic, handleLeaveGame, currentGame]);
+
+    const { isListening, isTalking, toggleListening } = useVoiceCommand(handleVoiceIntent);
+
     return (
         <div style={{ padding: currentGame ? 0 : '20px', display: 'flex', flexDirection: 'column', height: '100%' }}>
 
@@ -207,6 +247,25 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                             }}
                         >
                             {bgConfig.type !== 'none' ? '🎭 BG: ON' : '🎭 Virtual BG'}
+                        </button>
+
+                        {/* Voice Command Button */}
+                        <button 
+                            onClick={toggleListening}
+                            style={{ 
+                                padding: '8px 16px', 
+                                borderRadius: 20, 
+                                border: 'none', 
+                                background: isListening ? (isTalking ? '#ef4444' : '#f59e0b') : '#8b5cf6', 
+                                color: '#fff', 
+                                cursor: 'pointer',
+                                boxShadow: isListening ? '0 0 12px #ef4444' : 'none',
+                                transition: 'all 0.2s',
+                                fontWeight: 'bold'
+                            }}
+                            title="Toggle continuous voice recognition"
+                        >
+                            {isListening ? (isTalking ? '🗣️ Hearing...' : '🎙️ Active') : '🤖 Voice Action'}
                         </button>
                     </div>
                 </div>
@@ -264,6 +323,26 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                     >
                         ← Games
                     </button>
+                    
+                    {/* Voice Command Button (In-Game) */}
+                    <button 
+                        onClick={toggleListening}
+                        style={{ 
+                            position: 'fixed', top: 16, left: 120, zIndex: 500,
+                            padding: '8px 18px', borderRadius: 20, border: 'none', 
+                            background: isListening ? (isTalking ? '#ef4444' : '#f59e0b') : '#8b5cf6', 
+                            color: '#fff', fontSize: 14, fontWeight: 700,
+                            cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+                            boxShadow: isListening ? '0 0 12px #ef4444' : '0 2px 12px rgba(0,0,0,0.5)',
+                            backdropFilter: 'blur(8px)',
+                            transition: 'all 0.2s',
+                            letterSpacing: '0.02em',
+                        }}
+                        title="Toggle continuous voice recognition"
+                    >
+                        {isListening ? (isTalking ? '🗣️ Hearing...' : '🎙️ VAD Active') : '🤖 Voice Cmd'}
+                    </button>
+
                     <GameSelector
                         game={currentGame}
                         playerId={playerId}

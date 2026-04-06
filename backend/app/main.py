@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.database import db
-from app.routers import cv, rooms, websocket
+from app.routers import cv, rooms, websocket, voice
 
 
 @asynccontextmanager
@@ -65,6 +65,7 @@ app.add_middleware(
 app.include_router(rooms.router)
 app.include_router(cv.router)
 app.include_router(websocket.router)
+app.include_router(voice.router)
 
 
 # ── Health Endpoints ──────────────────────────────────────────────────────────

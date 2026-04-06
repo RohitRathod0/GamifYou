@@ -414,16 +414,18 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
         const W = canvas.width, H = canvas.height;
         const ctx = canvas.getContext('2d')!;
 
-        // ── Layer 1: Camera feed (mirrored) ───────────────────────────────────
-        ctx.save();
-        ctx.scale(-1, 1);
-        ctx.drawImage(video, -W, 0, W, H);
-        ctx.restore();
+        // ── Layer 1: Background ───────────────────────────────────────────────
+        // Fill with a deep elegant gradient instead of the camera feed
+        const bgGrad = ctx.createLinearGradient(0, 0, W, H);
+        bgGrad.addColorStop(0, '#1a1a2e');
+        bgGrad.addColorStop(1, '#0f3460');
+        ctx.fillStyle = bgGrad;
+        ctx.fillRect(0, 0, W, H);
 
-        // Vignette
+        // Vignette overlay for depth
         const vg = ctx.createRadialGradient(W / 2, H / 2, H * 0.2, W / 2, H / 2, H * 0.8);
         vg.addColorStop(0, 'rgba(0,0,0,0)');
-        vg.addColorStop(1, 'rgba(0,0,0,0.45)');
+        vg.addColorStop(1, 'rgba(0,0,0,0.6)');
         ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
 
         // ── FIX 4: Compute stable layout first (used for hit-testing) ─────────

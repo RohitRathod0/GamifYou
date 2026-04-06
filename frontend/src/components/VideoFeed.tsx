@@ -8,6 +8,9 @@ import { getSegmentation } from '@/components/Background/segmentationSingleton';
 interface VideoFeedProps {
     localStream?: MediaStream | null;
     onTrackingData?: (data: any, dataRef?: React.MutableRefObject<any>) => void;
+    externalBgConfig?: BackgroundConfig;
+    onBgConfigChange?: (cfg: BackgroundConfig) => void;
+    onModelReady?: (ready: boolean) => void;
 }
 
 const QUICK_BG: { label: string; emoji: string; config: BackgroundConfig }[] = [
@@ -21,7 +24,7 @@ const QUICK_BG: { label: string; emoji: string; config: BackgroundConfig }[] = [
     { label: 'Sepia', emoji: '📷', config: { type: 'style', styleFilter: 'vintage' } },
 ];
 
-export const VideoFeed: React.FC<VideoFeedProps> = ({ localStream = undefined, onTrackingData }) => {
+export const VideoFeed: React.FC<VideoFeedProps> = ({ localStream = undefined, onTrackingData, externalBgConfig, onBgConfigChange, onModelReady }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const segRef = useRef<any>(null);
@@ -39,6 +42,23 @@ export const VideoFeed: React.FC<VideoFeedProps> = ({ localStream = undefined, o
     const [modelReady, setModelReady] = useState(false);
     const [showPanel, setShowPanel] = useState(false);
     const [fps, setFps] = useState(0);
+
+    // Update external prop when model becomes ready
+    useEffect(() => {
+        onModelReady?.(modelReady);
+    }, [modelReady, onModelReady]);
+
+    // Update internal state when external config changes
+    useEffect(() => {
+        if (externalBgConfig) {
+            // simple check to avoid infinite loops if the reference changed but value corresponds
+            const isSameDetail = JSON.stringify(externalBgConfig) === JSON.stringify(bgConfig);
+            if (!isSameDetail) {
+                setBgConfig(externalBgConfig);
+                setIsActive(externalBgConfig.type !== 'none');
+            }
+        }
+    }, [externalBgConfig]);
 
     useEffect(() => { bgConfigRef.current = bgConfig; }, [bgConfig]);
 
@@ -223,6 +243,7 @@ export const VideoFeed: React.FC<VideoFeedProps> = ({ localStream = undefined, o
     const selectBg = (cfg: BackgroundConfig) => {
         setBgConfig(cfg);
         setIsActive(cfg.type !== 'none');
+        onBgConfigChange?.(cfg);
     };
 
     return (

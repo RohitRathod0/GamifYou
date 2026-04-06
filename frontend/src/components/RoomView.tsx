@@ -3,6 +3,8 @@ import { useWebSocket } from '@/hooks/useWebSocket';
 import { useWebRTC } from '@/hooks/useWebRTC';
 import { VideoFeed } from '@/components/VideoFeed';
 import { GameSelector } from '@/components/GameSelector';
+import { BackgroundConfig } from '@/components/Background/types';
+import { VirtualBgPanel } from '@/components/VirtualBgPanel';
 // removed HandTrackingData import
 
 interface RoomViewProps {
@@ -23,6 +25,10 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
     const [isMicMuted, setIsMicMuted] = useState(false);
     const [videoEnabled, setVideoEnabled] = useState(true);
     const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+
+    const [bgConfig, setBgConfig] = useState<BackgroundConfig>({ type: 'none' });
+    const [showBgPanel, setShowBgPanel] = useState(false);
+    const [bgModelReady, setBgModelReady] = useState(false);
 
     const [notifications, setNotifications] = useState<{ id: number; msg: string }[]>([]);
     const notifCounter = useRef(0);
@@ -180,19 +186,54 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                     <div style={{ display: 'flex', justifyContent: 'center', gap: 8, fontSize: '0.9rem', color: '#aaa', margin: '4px 0' }}>
                         <span>{username}</span>
                     </div>
-                    <div style={{ display: 'flex', justifyContent: 'center', gap: 10, marginTop: 10 }}>
+                    <div style={{ display: 'flex', justifyContent: 'center', gap: 10, marginTop: 10, position: 'relative' }}>
                         <button onClick={toggleMic} style={{ padding: '8px 16px', borderRadius: 20, border: 'none', background: isMicMuted ? '#ef4444' : '#3b82f6', color: '#fff', cursor: 'pointer' }}>
                             {isMicMuted ? '🔇 Mic Off' : '🎤 Mic On'}
                         </button>
                         <button onClick={() => setVideoEnabled(v => !v)} style={{ padding: '8px 16px', borderRadius: 20, border: 'none', background: videoEnabled ? '#3b82f6' : '#ef4444', color: '#fff', cursor: 'pointer' }}>
                             {videoEnabled ? '📷 Cam On' : '🚫 Cam Off'}
                         </button>
+                        
+                        {/* Virtual BG Button */}
+                        <button 
+                            onClick={() => setShowBgPanel(p => !p)} 
+                            style={{ 
+                                padding: '8px 16px', 
+                                borderRadius: 20, 
+                                border: 'none', 
+                                background: bgConfig.type !== 'none' ? '#06b6d4' : 'rgba(255,255,255,0.15)', 
+                                color: '#fff', 
+                                cursor: 'pointer' 
+                            }}
+                        >
+                            {bgConfig.type !== 'none' ? '🎭 BG: ON' : '🎭 Virtual BG'}
+                        </button>
                     </div>
                 </div>
             )}
 
+            {showBgPanel && (
+                <>
+                    <div 
+                        onClick={() => setShowBgPanel(false)} 
+                        style={{ position: 'fixed', inset: 0, zIndex: 499, background: 'transparent' }} 
+                    />
+                    <VirtualBgPanel 
+                        bgConfig={bgConfig} 
+                        onChange={setBgConfig} 
+                        onClose={() => setShowBgPanel(false)} 
+                        modelReady={bgModelReady} 
+                    />
+                </>
+            )}
+
             {/* Local Video Feed — Always visible in top right */}
-            <VideoFeed localStream={localStream} />
+            <VideoFeed 
+                localStream={localStream} 
+                externalBgConfig={bgConfig} 
+                onBgConfigChange={setBgConfig} 
+                onModelReady={setBgModelReady} 
+            />
 
             {/* Remote video PiP — shown during games too */}
             {remoteStreams.size > 0 && (
@@ -238,23 +279,81 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                     />
                 </div>
             ) : (
-                <div style={{ textAlign: 'center', marginTop: 40 }}>
-                    <p style={{ fontSize: '1.2rem', marginBottom: 20 }}>Select a game to start playing!</p>
-                    <div style={{ display: 'flex', gap: 20, justifyContent: 'center', flexWrap: 'wrap' }}>
+                <div style={{ textAlign: 'center', marginTop: 40, width: '100%', maxWidth: '1200px', margin: '40px auto 0' }}>
+                    <p style={{ fontSize: '2rem', marginBottom: 40, color: '#ffffff', fontWeight: '800', textShadow: '0 4px 12px rgba(0,0,0,0.3)', letterSpacing: '0.05em' }}>Select a Game</p>
+                    <div style={{ 
+                        display: 'grid', 
+                        gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', 
+                        gap: '24px', 
+                        padding: '0 20px',
+                        justifyContent: 'center',
+                        alignItems: 'stretch'
+                    }}>
                         {[
-                            { type: 'air_hockey', label: '🏒 Air Hockey', color: '#4CAF50' },
-                            { type: 'balloon_pop', label: '🎈 Balloon Pop', color: '#2196F3' },
-                            { type: 'chess', label: '♟️ Chess', color: '#00BCD4' },
-                            { type: 'scribble', label: '✏️ Scribble Draw', color: '#F59E0B' },
-                            { type: 'face_puzzle', label: '🧩 Face Puzzle', color: '#9C27B0' },
-                        ].map(({ type, label, color }) => (
+                            { type: 'air_hockey', label: 'Air Hockey', color: 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)', image: '/game-assets/air_hockey.png' },
+                            { type: 'chess', label: 'Chess', color: 'linear-gradient(135deg, #2c3e50 0%, #3498db 100%)', image: '/game-assets/chess.jpg' },
+                            { type: 'scribble', label: 'Scribble Draw', color: 'linear-gradient(135deg, #f2994a 0%, #f2c94c 100%)', image: '/game-assets/scribble.jpg' },
+                            { type: 'face_puzzle', label: 'Face Puzzle', color: 'linear-gradient(135deg, #8E2DE2 0%, #4A00E0 100%)', image: '/game-assets/puzzle.jpg' },
+                            { type: 'balloon_pop', label: 'Balloon Pop', color: 'linear-gradient(135deg, #FF416C 0%, #FF4B2B 100%)', image: '/game-assets/balloon.png' },
+                        ].map(({ type, label, color, image }) => (
                             <button key={type}
                                 onClick={() => {
                                     sendMessage('game_selected', { game_type: type });
                                     setAppState({ ...appState, currentGame: type });
                                 }}
-                                style={{ padding: '20px 40px', fontSize: '1.1rem', backgroundColor: color, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 'bold' }}>
-                                {label}
+                                style={{
+                                    position: 'relative',
+                                    height: '220px',
+                                    background: color,
+                                    color: '#fff',
+                                    border: 'none',
+                                    borderRadius: '24px',
+                                    cursor: 'pointer',
+                                    overflow: 'hidden',
+                                    boxShadow: '0 10px 30px rgba(0,0,0,0.2), inset 0 0 0 1px rgba(255,255,255,0.2)',
+                                    transition: 'all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275)',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    alignItems: 'center',
+                                    justifyContent: 'flex-end',
+                                    padding: '0',
+                                    transform: 'scale(1)',
+                                }}
+                                onMouseEnter={(e) => {
+                                    e.currentTarget.style.transform = 'scale(1.05) translateY(-8px)';
+                                    e.currentTarget.style.boxShadow = '0 20px 40px rgba(0,0,0,0.4), inset 0 0 0 2px rgba(255,255,255,0.4)';
+                                    const img = e.currentTarget.querySelector('img');
+                                    if(img) img.style.transform = 'scale(1.15)';
+                                }}
+                                onMouseLeave={(e) => {
+                                    e.currentTarget.style.transform = 'scale(1) translateY(0)';
+                                    e.currentTarget.style.boxShadow = '0 10px 30px rgba(0,0,0,0.2), inset 0 0 0 1px rgba(255,255,255,0.2)';
+                                    const img = e.currentTarget.querySelector('img');
+                                    if(img) img.style.transform = 'scale(1)';
+                                }}
+                            >
+                                {image ? (
+                                    <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', overflow: 'hidden' }}>
+                                        <img src={image} alt={label} style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: 0.85, mixBlendMode: 'normal', transition: 'transform 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275)' }} />
+                                        <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', background: 'linear-gradient(to bottom, rgba(0,0,0,0.1) 0%, rgba(0,0,0,0.8) 100%)' }} />
+                                    </div>
+                                ) : (
+                                    <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '5rem', opacity: 0.4 }}>
+                                        🎈
+                                    </div>
+                                )}
+                                <div style={{
+                                    width: '100%',
+                                    padding: '24px',
+                                    zIndex: 1,
+                                    display: 'flex',
+                                    justifyContent: 'center',
+                                    background: 'transparent'
+                                }}>
+                                    <span style={{ fontSize: '1.4rem', fontWeight: '800', letterSpacing: '1.5px', textTransform: 'uppercase', textShadow: '0 2px 10px rgba(0,0,0,0.9)' }}>
+                                        {label}
+                                    </span>
+                                </div>
                             </button>
                         ))}
                     </div>

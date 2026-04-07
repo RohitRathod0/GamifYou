@@ -168,6 +168,7 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
     // Leave active game → return to game picker (stay in /room)
     const handleLeaveGame = useCallback(() => {
         setAppState((prev: any) => ({ ...prev, currentGame: null }));
+        setIsListening(false);
     }, [setAppState]);
 
     const handleVoiceIntent = useCallback((result: any) => {
@@ -211,7 +212,19 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
         }
     }, [setAppState, sendMessage, showNotification, isMicMuted, toggleMic, handleLeaveGame, currentGame]);
 
-    const { isListening, isTalking, toggleListening } = useVoiceCommand(handleVoiceIntent);
+    const { isListening, setIsListening, isTalking, toggleListening } = useVoiceCommand(handleVoiceIntent);
+
+    // Turn-Aware Voice Auto-Toggle hook
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const detail = (e as CustomEvent).detail;
+            setIsListening(detail.active);
+            if (detail.active) showNotification('🎙️ Voice active (Your Turn)');
+            else showNotification('🔇 Voice inactive');
+        };
+        window.addEventListener('set_voice_active', handler);
+        return () => window.removeEventListener('set_voice_active', handler);
+    }, [setIsListening, showNotification]);
 
     return (
         <div style={{ padding: currentGame ? 0 : '20px', display: 'flex', flexDirection: 'column', height: '100%' }}>

@@ -107,6 +107,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
         if (gameState?.my_color) {
             myColorRef.current = gameState.my_color as PieceColor;
             setMyColor(gameState.my_color as PieceColor);
+            window.dispatchEvent(new CustomEvent('set_voice_active', { detail: { active: myColorRef.current === currentTurnRef.current } }));
         }
     }, [gameState?.my_color]);
 
@@ -132,7 +133,10 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
         const s = gameState?.incomingState;
         if (!s) return;
         if (s.chessBoard) boardRef.current = s.chessBoard;
-        if (s.currentTurn) currentTurnRef.current = s.currentTurn;
+        if (s.currentTurn) {
+            currentTurnRef.current = s.currentTurn;
+            window.dispatchEvent(new CustomEvent('set_voice_active', { detail: { active: myColorRef.current === s.currentTurn } }));
+        }
         if (s.enPassantTarget !== undefined) epRef.current = s.enPassantTarget;
         if (s.lastMove !== undefined) lastMoveRef.current = s.lastMove;
         if (s.gameOver) { gameOverRef.current = s.gameOver; setGameOverState(s.gameOver); }
@@ -269,6 +273,8 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
         const next: PieceColor = currentTurnRef.current === 'white' ? 'black' : 'white';
         boardRef.current = nb;
         currentTurnRef.current = next;
+        window.dispatchEvent(new CustomEvent('set_voice_active', { detail: { active: myColorRef.current === next } }));
+        
         epRef.current = newEp;
         lastMoveRef.current = { from, to };
         selectedRef.current = null;

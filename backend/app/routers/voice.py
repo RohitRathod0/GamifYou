@@ -47,8 +47,12 @@ async def voice_command(audio: UploadFile = File(...)) -> VoiceCommandResponse:
     try:
         text = await engine.transcribe(audio_bytes)
     except RuntimeError as e:
+        print(f"🛑 [Voice Route] 503 RuntimeError: {e}")
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
+        import traceback
+        print("🛑 [Voice Route] 500 Exception caught:")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Transcription error: {e}")
 
     result = match_intent(text)

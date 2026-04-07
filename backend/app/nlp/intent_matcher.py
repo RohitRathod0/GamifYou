@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from typing import Optional
+from thefuzz import process, fuzz
 
 # ── Intent names ─────────────────────────────────────────────────────────────
 START_GAME      = "START_GAME"
@@ -75,6 +76,23 @@ _MUTE_PATTERNS   = re.compile(r"\b(mute|silence|quiet)\b", re.IGNORECASE)
 _UNMUTE_PATTERNS = re.compile(r"\b(unmute|speak|voice on)\b", re.IGNORECASE)
 _LEAVE_PATTERNS  = re.compile(r"\b(leave|exit|quit|back|stop game|go back)\b", re.IGNORECASE)
 
+# ── Canonical Intents for Fuzz Matching ──────────────────────────────────────
+# We map typical spoken phrases directly to intents to avoid fragile regex
+CANONICAL_INTENTS = {
+    "play chess": (START_GAME, {"game_type": "chess"}),
+    "start air hockey": (START_GAME, {"game_type": "air_hockey"}),
+    "draw scribble": (START_GAME, {"game_type": "scribble"}),
+    "open balloon pop": (START_GAME, {"game_type": "balloon_pop"}),
+    "face puzzle": (START_GAME, {"game_type": "face_puzzle"}),
+    "background space": (CHANGE_BG, {"bgConfig": _BG_ALIASES["space"]}),
+    "background office": (CHANGE_BG, {"bgConfig": _BG_ALIASES["office"]}),
+    "background beach": (CHANGE_BG, {"bgConfig": _BG_ALIASES["beach"]}),
+    "remove background": (CHANGE_BG, {"bgConfig": _BG_ALIASES["none"]}),
+    "mute microphone": (MUTE_MIC, {}),
+    "unmute microphone": (UNMUTE_MIC, {}),
+    "leave game": (LEAVE_GAME, {}),
+}
+
 
 @dataclass
 class IntentResult:
@@ -108,58 +126,21 @@ def extract_chess_move(text: str) -> dict | None:
 def match_intent(text: str) -> IntentResult:
     """Parse a raw Whisper transcript into a structured intent."""
     text_lower = text.lower().strip()
+    
+    if not text_lower:
+        return IntentResult(intent=UNKNOWN, confidence=0.0, action={})
 
-    # 1. START_GAME
-    m = _START_PATTERNS.search(text_lower)
-    if m:
-        game_phrase = m.group(2).lower()
-        # try exact match first, then partial
-        game_type = _GAME_ALIASES.get(game_phrase)
-        if not game_type:
-            for alias, gtype in _GAME_ALIASES.items():
-                if alias in text_lower:
-                    game_type = gtype
-                    break
-        if game_type:
-            return IntentResult(
-                intent=START_GAME,
-                confidence=0.95,
-                action={"game_type": game_type},
-            )
+    # 1. Fuzzy match canonical globals first
+    # Find best match from our predefined phrases list
+    choices = list(CANONICAL_INTENTS.keys())
+    best_match, score = process.extractOne(text_lower, choices, scorer=fuzz.token_set_ratio)
+    
+    # If confidence is > 75%, execute it
+    if score >= 75:
+        intent, action = CANONICAL_INTENTS[best_match]
+        return IntentResult(intent=intent, confidence=score/100.0, action=action)
 
-    # 2. Direct game name (no verb required — "Air Hockey!" is enough)
-    for alias, gtype in _GAME_ALIASES.items():
-        if alias in text_lower:
-            return IntentResult(
-                intent=START_GAME,
-                confidence=0.75,
-                action={"game_type": gtype},
-            )
-
-    # 3. CHANGE_BG
-    m = _BG_PATTERNS.search(text_lower)
-    if m:
-        bg_phrase = m.group(2).lower()
-        bg_cfg = _BG_ALIASES.get(bg_phrase)
-        if bg_cfg:
-            return IntentResult(intent=CHANGE_BG, confidence=0.92, action={"bgConfig": bg_cfg})
-
-    # Also try: "background space" without a verb
-    for keyword, bg_cfg in _BG_ALIASES.items():
-        if keyword in text_lower and any(w in text_lower for w in ("background", "bg", "filter", "theme")):
-            return IntentResult(intent=CHANGE_BG, confidence=0.80, action={"bgConfig": bg_cfg})
-
-    # 4. MUTE / UNMUTE
-    if _UNMUTE_PATTERNS.search(text_lower):
-        return IntentResult(intent=UNMUTE_MIC, confidence=0.88, action={})
-    if _MUTE_PATTERNS.search(text_lower):
-        return IntentResult(intent=MUTE_MIC, confidence=0.88, action={})
-
-    # 5. LEAVE_GAME
-    if _LEAVE_PATTERNS.search(text_lower):
-        return IntentResult(intent=LEAVE_GAME, confidence=0.82, action={})
-
-    # 6. CHESS_MOVE 
+    # 2. CHESS_MOVE 
     chess_action = extract_chess_move(text_lower)
     if chess_action:
         return IntentResult(intent=CHESS_MOVE, confidence=0.90, action=chess_action)

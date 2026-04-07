@@ -12,6 +12,7 @@ class WhisperEngine:
             cls._instance = super(WhisperEngine, cls).__new__(cls)
             cls._instance.model = None
             cls._instance.executor = ThreadPoolExecutor(max_workers=2)
+            cls._instance.lock = asyncio.Lock()
             # Pre-load the tiny model in background thread on init
             import threading
             threading.Thread(target=cls._instance._load_model, daemon=True).start()
@@ -46,15 +47,19 @@ class WhisperEngine:
             
             # Add domain context so the model stops heavily hallucinating acronyms 
             prompt = (
-                "Game command context. Move piece from a1, b2, c3, d4, e5, f6, g7, h8. "
-                "Knight to f3, Pawn takes d4. Start game, background space."
+                "Chess move commands: e4, d5, knight to f3, castle kingside, queen to h5"
             )
             # Offload heavy ML inference to ThreadPool
-            result = await loop.run_in_executor(
-                self.executor,
-                lambda: self.model.transcribe(temp_path, fp16=False, initial_prompt=prompt)
-            )
+            async with self.lock:
+                result = await loop.run_in_executor(
+                    self.executor,
+                    lambda: self.model.transcribe(temp_path, fp16=False, initial_prompt=prompt)
+                )
             return result.get("text", "").strip()
+        except Exception as ex:
+            import traceback
+            traceback.print_exc()
+            raise ex
         finally:
             # Clean up temp file
             if os.path.exists(temp_path):

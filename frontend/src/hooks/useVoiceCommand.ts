@@ -167,6 +167,7 @@ export function useVoiceCommand(onIntentMatched: (result: VoiceIntentResult) => 
 
     return {
         isListening,
+        setIsListening,
         isTalking,
         toggleListening
     };

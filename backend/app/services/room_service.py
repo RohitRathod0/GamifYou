@@ -1,8 +1,8 @@
 import random
 import string
 from typing import Optional, List
-from app.models import Room, Player, PlayerStatus, GameType
-from app.database import db
+from app.schemas.room import Room, Player, PlayerStatus, GameType, RoomSummary
+from app.redis_db import db
 from app.config import settings
 from datetime import datetime
 
@@ -15,7 +15,7 @@ class RoomService:
 
     
     @staticmethod
-    async def create_room(host_id: str, username: str, max_players: int = 6) -> Room:
+    async def create_room(host_id: str, username: str, max_players: int = 6, is_public: bool = False) -> Room:
         """Create a new game room"""
         # Generate unique room code
         while True:
@@ -35,13 +35,16 @@ class RoomService:
             room_code=room_code,
             host_id=host_id,
             players=[host],
-            max_players=max_players
+            max_players=max_players,
+            is_public=is_public
         )
         
         # Save to Redis
         await db.set(f"room:{room_code}", room.model_dump(mode='json'), expire=3600)  # 1 hour expiry
         await db.set_add("active_rooms", room_code)
         await db.set_add(f"room:{room_code}:players", host_id)
+        if is_public:
+            await db.set_add("public_rooms", room_code)
         
         return room
     
@@ -97,6 +100,7 @@ class RoomService:
         if not room.players:
             await db.delete(f"room:{room_code}")
             await db.set_remove("active_rooms", room_code)
+            await db.set_remove("public_rooms", room_code)  # clean up public set
             await db.delete(f"room:{room_code}:players")
             return None
         
@@ -174,3 +178,25 @@ class RoomService:
         """Get all active room codes"""
         rooms = await db.set_members("active_rooms")
         return list(rooms) if rooms else []
+
+    @staticmethod
+    async def get_public_rooms() -> List[RoomSummary]:
+        """Return summaries of all public rooms that still have space."""
+        public_codes = await db.set_members("public_rooms")
+        if not public_codes:
+            return []
+        summaries: List[RoomSummary] = []
+        for code in public_codes:
+            room = await RoomService.get_room(code)
+            if room and room.is_public and len(room.players) < room.max_players:
+                summaries.append(RoomSummary(
+                    room_code=room.room_code,
+                    host_username=room.players[0].username if room.players else "Unknown",
+                    player_count=len(room.players),
+                    max_players=room.max_players,
+                    current_game=room.current_game.value if room.current_game else None,
+                    is_public=True,
+                    created_at=room.created_at,
+                ))
+        # Sort by most players first (busier rooms first)
+        return sorted(summaries, key=lambda r: r.player_count, reverse=True)

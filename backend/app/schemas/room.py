@@ -36,11 +36,24 @@ class Room(BaseModel):
     game_state: Dict[str, Any] = {}
     created_at: datetime = Field(default_factory=datetime.now)
     is_active: bool = True
+    is_public: bool = False
 
 
 class CreateRoomRequest(BaseModel):
     username: str
     max_players: int = Field(default=6, ge=2, le=6)
+    is_public: bool = False
+
+
+class RoomSummary(BaseModel):
+    """Lean model for lobby listings — never exposes game_state or player IDs."""
+    room_code: str
+    host_username: str
+    player_count: int
+    max_players: int
+    current_game: Optional[str] = None
+    is_public: bool
+    created_at: Optional[datetime] = None
 
 
 class JoinRoomRequest(BaseModel):

@@ -19,9 +19,9 @@ class WhisperEngine:
         return cls._instance
 
     def _load_model(self):
-        print("🧠 [Whisper] Loading 'tiny.en' model...")
+        print("[Whisper] Loading 'tiny.en' model...")
         self.model = whisper.load_model("tiny.en")
-        print("✅ [Whisper] 'tiny.en' model loaded and ready!")
+        print("[Whisper] 'tiny.en' model loaded and ready!")
 
     async def transcribe(self, audio_bytes: bytes) -> str:
         """
@@ -30,7 +30,7 @@ class WhisperEngine:
         """
         if self.model is None:
             # wait briefly if models isn't loaded yet
-            print("⏳ [Whisper] Model still loading, delaying request...")
+            print("[Whisper] Model still loading, delaying request...")
             for _ in range(10):
                 await asyncio.sleep(1)
                 if self.model is not None: break

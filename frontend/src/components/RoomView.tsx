@@ -5,6 +5,7 @@ import { VideoFeed } from '@/components/VideoFeed';
 import { GameSelector } from '@/components/GameSelector';
 import { BackgroundConfig } from '@/components/Background/types';
 import { VirtualBgPanel } from '@/components/VirtualBgPanel';
+import { GamesGrid } from '@/components/sections/GamesGrid';
 import { useVoiceCommand } from '@/hooks/useVoiceCommand';
 // removed HandTrackingData import
 
@@ -34,8 +35,6 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
     const [notifications, setNotifications] = useState<{ id: number; msg: string }[]>([]);
     const notifCounter = useRef(0);
 
-    // Wait to define hook until callback is defined to avoid dependency issues
-
     const showNotification = useCallback((msg: string) => {
         const id = notifCounter.current++;
         setNotifications(prev => [...prev, { id, msg }]);
@@ -45,9 +44,6 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
     const pendingOffersRef = useRef<string[]>([]);
 
     // ── Back-button interception ───────────────────────────────────────────────
-    // When a game starts, push a dummy history entry. Browser "Back" fires
-    // popstate — we intercept it and clear currentGame (stay in /room) instead
-    // of letting the router navigate away to /lobby.
     useEffect(() => {
         if (currentGame) {
             window.history.pushState({ inGame: true, game: currentGame }, '');
@@ -57,14 +53,12 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
     useEffect(() => {
         const handlePopState = (e: PopStateEvent) => {
             if (e.state?.inGame) {
-                // Stay in /room — just clear the active game
                 setAppState((prev: any) => ({ ...prev, currentGame: null }));
             }
         };
         window.addEventListener('popstate', handlePopState);
         return () => window.removeEventListener('popstate', handlePopState);
     }, [setAppState]);
-    // ──────────────────────────────────────────────────────────────────────────
 
     // Get camera + mic ONCE, share everywhere
     useEffect(() => {
@@ -115,7 +109,6 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                     closePeerConnection(data.player_id);
                     break;
 
-                // Only fires after chess is selected (not on connect)
                 case 'chess_color_assign':
                     setMyChessColor(data.color);
                     if (data.color === 'white') setWhitePlayerId(playerId);
@@ -165,7 +158,6 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
         localStream?.getAudioTracks().forEach(t => { t.enabled = !next; });
     }, [isMicMuted, setMicEnabled, localStream]);
 
-    // Leave active game → return to game picker (stay in /room)
     const handleLeaveGame = useCallback(() => {
         setAppState((prev: any) => ({ ...prev, currentGame: null }));
         setIsListening(false);
@@ -214,7 +206,6 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
 
     const { isListening, setIsListening, isTalking, toggleListening } = useVoiceCommand(handleVoiceIntent);
 
-    // Turn-Aware Voice Auto-Toggle hook
     useEffect(() => {
         const handler = (e: Event) => {
             const detail = (e as CustomEvent).detail;
@@ -226,139 +217,166 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
         return () => window.removeEventListener('set_voice_active', handler);
     }, [setIsListening, showNotification]);
 
-    return (
-        <div style={{ padding: currentGame ? 0 : '20px', display: 'flex', flexDirection: 'column', height: '100%' }}>
+    // ── RENDER ────────────────────────────────────────────────────────────────
 
-            {/* Toasts */}
-            <div style={{ position: 'fixed', top: 20, left: '50%', transform: 'translateX(-50%)', zIndex: 9999, display: 'flex', flexDirection: 'column', gap: 10 }}>
+    return (
+        <div style={{ minHeight: '100vh', background: currentGame ? '#0a0a0a' : '#ffffff', display: 'flex', flexDirection: 'column' }}>
+
+            {/* ── Toast Notifications ───────────────────────────────────────────── */}
+            <div style={{ position: 'fixed', top: 80, left: '50%', transform: 'translateX(-50%)', zIndex: 9999, display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'center' }}>
                 {notifications.map(n => (
-                    <div key={n.id} style={{ background: 'rgba(76,175,80,0.9)', color: '#fff', padding: '12px 24px', borderRadius: 8, boxShadow: '0 4px 6px rgba(0,0,0,0.3)', animation: 'fadeInOut 4s forwards', fontWeight: 'bold' }}>
+                    <div key={n.id} style={{
+                        background: '#111111', color: '#ffffff',
+                        padding: '14px 20px', borderRadius: 12,
+                        fontSize: 14, fontWeight: 500,
+                        boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
+                        display: 'flex', alignItems: 'center', gap: 10,
+                        animation: 'fadeInOut 4s forwards',
+                        whiteSpace: 'nowrap',
+                    }}>
                         {n.msg}
                     </div>
                 ))}
             </div>
 
-            {/* Header — unmounted while a game is active */}
+            {/* ── Pre-game sticky header ────────────────────────────────────────── */}
             {!currentGame && (
-                <div style={{ marginBottom: 20, textAlign: 'center' }}>
-                    <h2>Room: {roomCode}</h2>
-                    <div style={{ display: 'flex', justifyContent: 'center', gap: 8, fontSize: '0.9rem', color: '#aaa', margin: '4px 0' }}>
-                        <span>{username}</span>
+                <div style={{
+                    background: '#ffffff',
+                    borderBottom: '1px solid rgba(0,0,0,0.06)',
+                    padding: '16px clamp(16px,4vw,48px)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    flexWrap: 'wrap', gap: 12,
+                    position: 'sticky', top: 0, zIndex: 50,
+                }}>
+                    {/* Room info */}
+                    <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            <span style={{ fontFamily: 'monospace', fontSize: 22, fontWeight: 800, color: '#111111', letterSpacing: '0.04em' }}>
+                                {roomCode}
+                            </span>
+                            {myChessColor && (
+                                <span style={myChessColor === 'white'
+                                    ? { background: '#f3f4f6', color: '#374151', borderRadius: 100, padding: '4px 12px', fontSize: 12, fontWeight: 600, border: '1px solid rgba(0,0,0,0.1)' }
+                                    : { background: '#111111', color: '#ffffff', borderRadius: 100, padding: '4px 12px', fontSize: 12, fontWeight: 600 }
+                                }>
+                                    {myChessColor === 'white' ? '⬜ White' : '⬛ Black'}
+                                </span>
+                            )}
+                        </div>
+                        <p style={{ fontSize: 14, color: '#6b7280', marginTop: 2 }}>
+                            Playing as <strong style={{ color: '#374151' }}>{username}</strong>
+                        </p>
                     </div>
-                    <div style={{ display: 'flex', justifyContent: 'center', gap: 10, marginTop: 10, position: 'relative' }}>
-                        <button onClick={toggleMic} style={{ padding: '8px 16px', borderRadius: 20, border: 'none', background: isMicMuted ? '#ef4444' : '#3b82f6', color: '#fff', cursor: 'pointer' }}>
-                            {isMicMuted ? '🔇 Mic Off' : '🎤 Mic On'}
-                        </button>
-                        <button onClick={() => setVideoEnabled(v => !v)} style={{ padding: '8px 16px', borderRadius: 20, border: 'none', background: videoEnabled ? '#3b82f6' : '#ef4444', color: '#fff', cursor: 'pointer' }}>
-                            {videoEnabled ? '📷 Cam On' : '🚫 Cam Off'}
-                        </button>
-                        
-                        {/* Virtual BG Button */}
-                        <button 
-                            onClick={() => setShowBgPanel(p => !p)} 
-                            style={{ 
-                                padding: '8px 16px', 
-                                borderRadius: 20, 
-                                border: 'none', 
-                                background: bgConfig.type !== 'none' ? '#06b6d4' : 'rgba(255,255,255,0.15)', 
-                                color: '#fff', 
-                                cursor: 'pointer' 
-                            }}
-                        >
-                            {bgConfig.type !== 'none' ? '🎭 BG: ON' : '🎭 Virtual BG'}
+
+                    {/* Control pills (Meet style) */}
+                    <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+                        {/* Mic */}
+                        <button onClick={toggleMic} title={isMicMuted ? "Turn on microphone" : "Turn off microphone"}
+                            style={{
+                                width: 44, height: 44, borderRadius: '50%', border: 'none', cursor: 'pointer',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                background: isMicMuted ? '#ea4335' : '#3c4043', color: '#fff',
+                                transition: 'all 0.2s',
+                            }}>
+                            {isMicMuted ? (
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="2" x2="22" y1="2" y2="22"/><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 12 5"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+                            ) : (
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+                            )}
                         </button>
 
-                        {/* Voice Command Button */}
-                        <button 
-                            onClick={toggleListening}
-                            style={{ 
-                                padding: '8px 16px', 
-                                borderRadius: 20, 
-                                border: 'none', 
-                                background: isListening ? (isTalking ? '#ef4444' : '#f59e0b') : '#8b5cf6', 
-                                color: '#fff', 
-                                cursor: 'pointer',
-                                boxShadow: isListening ? '0 0 12px #ef4444' : 'none',
+                        {/* Camera */}
+                        <button onClick={() => setVideoEnabled(v => !v)} title={!videoEnabled ? "Turn on camera" : "Turn off camera"}
+                            style={{
+                                width: 44, height: 44, borderRadius: '50%', border: 'none', cursor: 'pointer',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                background: !videoEnabled ? '#ea4335' : '#3c4043', color: '#fff',
                                 transition: 'all 0.2s',
-                                fontWeight: 'bold'
-                            }}
-                            title="Toggle continuous voice recognition"
-                        >
-                            {isListening ? (isTalking ? '🗣️ Hearing...' : '🎙️ Active') : '🤖 Voice Action'}
+                            }}>
+                            {!videoEnabled ? (
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="2" x2="22" y1="2" y2="22"/><path d="M7 5H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 1.71-1.03"/><path d="M22 17.5V7a2 2 0 0 0-2-2h-8.5"/><path d="M16 12l7-5v10l-3.32-2.37"/></svg>
+                            ) : (
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect width="15" height="14" x="1" y="5" rx="2" ry="2"/></svg>
+                            )}
+                        </button>
+
+                        {/* Voice Command (Sparkles) */}
+                        <button onClick={toggleListening} title={isListening ? "Turn off continuous voice recognition" : "Turn on continuous voice recognition"}
+                            style={{
+                                width: 44, height: 44, borderRadius: '50%', border: 'none', cursor: 'pointer',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                background: isListening ? (isTalking ? '#ea4335' : '#0369a1') : '#3c4043', color: '#fff',
+                                transition: 'all 0.2s',
+                            }}>
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/></svg>
+                        </button>
+
+                        {/* More Options / 3 dots (Virtual BG) */}
+                        <button onClick={() => setShowBgPanel(p => !p)} title="Virtual Background & Options"
+                            style={{
+                                width: 44, height: 44, borderRadius: '50%', border: 'none', cursor: 'pointer',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                background: bgConfig.type !== 'none' ? '#0369a1' : '#3c4043', color: '#fff',
+                                transition: 'all 0.2s',
+                            }}>
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/></svg>
                         </button>
                     </div>
                 </div>
             )}
 
+            {/* ── Virtual BG Panel ──────────────────────────────────────────────── */}
             {showBgPanel && (
                 <>
-                    <div 
-                        onClick={() => setShowBgPanel(false)} 
-                        style={{ position: 'fixed', inset: 0, zIndex: 499, background: 'transparent' }} 
-                    />
-                    <VirtualBgPanel 
-                        bgConfig={bgConfig} 
-                        onChange={setBgConfig} 
-                        onClose={() => setShowBgPanel(false)} 
-                        modelReady={bgModelReady} 
-                    />
+                    <div onClick={() => setShowBgPanel(false)} style={{ position: 'fixed', inset: 0, zIndex: 499, background: 'transparent' }} />
+                    <VirtualBgPanel bgConfig={bgConfig} onChange={setBgConfig} onClose={() => setShowBgPanel(false)} modelReady={bgModelReady} />
                 </>
             )}
 
-            {/* Local Video Feed — Always visible in top right */}
-            <VideoFeed 
-                localStream={localStream} 
-                externalBgConfig={bgConfig} 
-                onBgConfigChange={setBgConfig} 
-                onModelReady={setBgModelReady} 
-            />
+            {/* ── Local Video Feed — always visible top-right ───────────────────── */}
+            <VideoFeed localStream={localStream} externalBgConfig={bgConfig} onBgConfigChange={setBgConfig} onModelReady={setBgModelReady} />
 
-            {/* Remote video PiP — shown during games too */}
+            {/* ── Remote video PiP ──────────────────────────────────────────────── */}
             {remoteStreams.size > 0 && (
-                <div style={{ position: 'fixed', bottom: 20, left: 20, zIndex: 1000, width: 320, height: 240, borderRadius: 12, overflow: 'hidden', boxShadow: '0 8px 32px rgba(0,0,0,0.5)', border: '2px solid #3b82f6', background: '#000' }}>
+                <div style={{
+                    position: 'fixed', bottom: 20, left: 20, zIndex: 1000,
+                    width: 320, height: 240, borderRadius: 16, overflow: 'hidden',
+                    boxShadow: '0 8px 32px rgba(0,0,0,0.15)', border: '1px solid rgba(0,0,0,0.1)', background: '#000',
+                }}>
                     <video ref={remoteVideoRef} autoPlay playsInline style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                    <div style={{ position: 'absolute', bottom: 5, left: 5, background: 'rgba(0,0,0,0.7)', padding: '4px 10px', borderRadius: 4, fontSize: 12, color: '#fff' }}>Opponent</div>
-                    <button onClick={toggleMic} style={{ position: 'absolute', top: 6, right: 6, background: isMicMuted ? 'rgba(239,68,68,0.85)' : 'rgba(59,130,246,0.85)', border: 'none', borderRadius: 8, padding: '4px 10px', color: '#fff', fontSize: 13, cursor: 'pointer' }}>
+                    <div style={{ position: 'absolute', bottom: 0, left: 0, background: 'rgba(0,0,0,0.6)', color: '#fff', fontSize: 12, padding: '4px 10px', borderRadius: '0 0 0 16px' }}>Opponent</div>
+                    <button onClick={toggleMic} style={{ position: 'absolute', top: 8, right: 8, background: isMicMuted ? 'rgba(239,68,68,0.85)' : 'rgba(59,130,246,0.85)', border: 'none', borderRadius: 8, padding: '4px 10px', color: '#fff', fontSize: 13, cursor: 'pointer' }}>
                         {isMicMuted ? '🔇' : '🎤'}
                     </button>
                 </div>
             )}
 
-            {/* Game area */}
+            {/* ── Game area ─────────────────────────────────────────────────────── */}
             {currentGame ? (
                 <div style={{ flex: 1, position: 'relative' }}>
-                    {/* ← Games button — fixed overlay so it's always reachable */}
-                    <button
-                        onClick={handleLeaveGame}
-                        style={{
-                            position: 'fixed', top: 16, left: 16, zIndex: 500,
-                            padding: '8px 18px', borderRadius: 20, border: 'none',
-                            background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(8px)',
-                            color: '#fff', fontSize: 14, fontWeight: 700,
-                            cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
-                            boxShadow: '0 2px 12px rgba(0,0,0,0.5)',
-                            letterSpacing: '0.02em',
-                        }}
-                    >
+                    {/* ← Games overlay button */}
+                    <button onClick={handleLeaveGame} style={{
+                        position: 'fixed', top: 16, left: 16, zIndex: 500,
+                        padding: '8px 18px', borderRadius: 20, border: 'none',
+                        background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(8px)',
+                        color: '#fff', fontSize: 14, fontWeight: 700,
+                        cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+                        boxShadow: '0 2px 12px rgba(0,0,0,0.5)', letterSpacing: '0.02em',
+                    }}>
                         ← Games
                     </button>
-                    
-                    {/* Voice Command Button (In-Game) */}
-                    <button 
-                        onClick={toggleListening}
-                        style={{ 
-                            position: 'fixed', top: 16, left: 120, zIndex: 500,
-                            padding: '8px 18px', borderRadius: 20, border: 'none', 
-                            background: isListening ? (isTalking ? '#ef4444' : '#f59e0b') : '#8b5cf6', 
-                            color: '#fff', fontSize: 14, fontWeight: 700,
-                            cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
-                            boxShadow: isListening ? '0 0 12px #ef4444' : '0 2px 12px rgba(0,0,0,0.5)',
-                            backdropFilter: 'blur(8px)',
-                            transition: 'all 0.2s',
-                            letterSpacing: '0.02em',
-                        }}
-                        title="Toggle continuous voice recognition"
-                    >
+
+                    {/* Voice overlay button (in-game) */}
+                    <button onClick={toggleListening} title="Toggle continuous voice recognition" style={{
+                        position: 'fixed', top: 16, left: 120, zIndex: 500,
+                        padding: '8px 18px', borderRadius: 20, border: 'none',
+                        background: isListening ? (isTalking ? '#ef4444' : '#f59e0b') : '#8b5cf6',
+                        color: '#fff', fontSize: 14, fontWeight: 700,
+                        cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+                        boxShadow: isListening ? '0 0 12px #ef4444' : '0 2px 12px rgba(0,0,0,0.5)',
+                        backdropFilter: 'blur(8px)', transition: 'all 0.2s', letterSpacing: '0.02em',
+                    }}>
                         {isListening ? (isTalking ? '🗣️ Hearing...' : '🎙️ VAD Active') : '🤖 Voice Cmd'}
                     </button>
 
@@ -377,88 +395,16 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                     />
                 </div>
             ) : (
-                <div style={{ textAlign: 'center', marginTop: 40, width: '100%', maxWidth: '1200px', margin: '40px auto 0' }}>
-                    <p style={{ fontSize: '2rem', marginBottom: 40, color: '#ffffff', fontWeight: '800', textShadow: '0 4px 12px rgba(0,0,0,0.3)', letterSpacing: '0.05em' }}>Select a Game</p>
-                    <div style={{ 
-                        display: 'grid', 
-                        gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', 
-                        gap: '24px', 
-                        padding: '0 20px',
-                        justifyContent: 'center',
-                        alignItems: 'stretch'
-                    }}>
-                        {[
-                            { type: 'air_hockey', label: 'Air Hockey', color: 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)', image: '/game-assets/air_hockey.png' },
-                            { type: 'chess', label: 'Chess', color: 'linear-gradient(135deg, #2c3e50 0%, #3498db 100%)', image: '/game-assets/chess.jpg' },
-                            { type: 'scribble', label: 'Scribble Draw', color: 'linear-gradient(135deg, #f2994a 0%, #f2c94c 100%)', image: '/game-assets/scribble.jpg' },
-                            { type: 'face_puzzle', label: 'Face Puzzle', color: 'linear-gradient(135deg, #8E2DE2 0%, #4A00E0 100%)', image: '/game-assets/puzzle.jpg' },
-                            { type: 'balloon_pop', label: 'Balloon Pop', color: 'linear-gradient(135deg, #FF416C 0%, #FF4B2B 100%)', image: '/game-assets/balloon.png' },
-                        ].map(({ type, label, color, image }) => (
-                            <button key={type}
-                                onClick={() => {
-                                    sendMessage('game_selected', { game_type: type });
-                                    setAppState({ ...appState, currentGame: type });
-                                }}
-                                style={{
-                                    position: 'relative',
-                                    height: '220px',
-                                    background: color,
-                                    color: '#fff',
-                                    border: 'none',
-                                    borderRadius: '24px',
-                                    cursor: 'pointer',
-                                    overflow: 'hidden',
-                                    boxShadow: '0 10px 30px rgba(0,0,0,0.2), inset 0 0 0 1px rgba(255,255,255,0.2)',
-                                    transition: 'all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275)',
-                                    display: 'flex',
-                                    flexDirection: 'column',
-                                    alignItems: 'center',
-                                    justifyContent: 'flex-end',
-                                    padding: '0',
-                                    transform: 'scale(1)',
-                                }}
-                                onMouseEnter={(e) => {
-                                    e.currentTarget.style.transform = 'scale(1.05) translateY(-8px)';
-                                    e.currentTarget.style.boxShadow = '0 20px 40px rgba(0,0,0,0.4), inset 0 0 0 2px rgba(255,255,255,0.4)';
-                                    const img = e.currentTarget.querySelector('img');
-                                    if(img) img.style.transform = 'scale(1.15)';
-                                }}
-                                onMouseLeave={(e) => {
-                                    e.currentTarget.style.transform = 'scale(1) translateY(0)';
-                                    e.currentTarget.style.boxShadow = '0 10px 30px rgba(0,0,0,0.2), inset 0 0 0 1px rgba(255,255,255,0.2)';
-                                    const img = e.currentTarget.querySelector('img');
-                                    if(img) img.style.transform = 'scale(1)';
-                                }}
-                            >
-                                {image ? (
-                                    <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', overflow: 'hidden' }}>
-                                        <img src={image} alt={label} style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: 0.85, mixBlendMode: 'normal', transition: 'transform 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275)' }} />
-                                        <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', background: 'linear-gradient(to bottom, rgba(0,0,0,0.1) 0%, rgba(0,0,0,0.8) 100%)' }} />
-                                    </div>
-                                ) : (
-                                    <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '5rem', opacity: 0.4 }}>
-                                        🎈
-                                    </div>
-                                )}
-                                <div style={{
-                                    width: '100%',
-                                    padding: '24px',
-                                    zIndex: 1,
-                                    display: 'flex',
-                                    justifyContent: 'center',
-                                    background: 'transparent'
-                                }}>
-                                    <span style={{ fontSize: '1.4rem', fontWeight: '800', letterSpacing: '1.5px', textTransform: 'uppercase', textShadow: '0 2px 10px rgba(0,0,0,0.9)' }}>
-                                        {label}
-                                    </span>
-                                </div>
-                            </button>
-                        ))}
-                    </div>
+                /* ── Game picker ── */
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+                    <GamesGrid onSelectGame={(type) => {
+                        sendMessage('game_selected', { game_type: type });
+                        setAppState((prev: any) => ({ ...prev, currentGame: type }));
+                    }} />
                 </div>
             )}
 
-            <style>{`@keyframes fadeInOut { 0%{opacity:0;transform:translateY(-20px)} 10%{opacity:1;transform:translateY(0)} 90%{opacity:1;transform:translateY(0)} 100%{opacity:0;transform:translateY(-20px)} }`}</style>
+            <style>{`@keyframes fadeInOut { 0%{opacity:0;transform:translateY(-16px)} 10%{opacity:1;transform:translateY(0)} 90%{opacity:1;transform:translateY(0)} 100%{opacity:0;transform:translateY(-16px)} }`}</style>
         </div>
     );
 };

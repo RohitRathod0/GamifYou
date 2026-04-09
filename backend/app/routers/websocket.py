@@ -16,7 +16,7 @@ from typing import Dict, List, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.models import GameType, WSMessageType
+from app.schemas.room import GameType, WSMessageType
 from app.services.game_service import GameService
 from app.services.gesture_pipeline import GesturePipeline
 from app.services.room_service import RoomService
@@ -209,6 +209,18 @@ async def websocket_endpoint(
         },
         room_code,
         exclude_player=player_id,
+    )
+
+    # Notify all connected clients about updated player count (lobby can react)
+    await manager.broadcast_to_room(
+        {
+            "type": "room_player_count_updated",
+            "data": {
+                "room_code": room_code,
+                "player_count": manager.get_room_player_count(room_code),
+            },
+        },
+        room_code,
     )
 
     try:

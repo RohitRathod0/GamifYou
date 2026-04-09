@@ -1,5 +1,10 @@
 from fastapi import APIRouter, HTTPException, status
-from app.models import CreateRoomRequest, JoinRoomRequest, Room
+from app.schemas.room import (
+    CreateRoomRequest,
+    JoinRoomRequest,
+    Room,
+    RoomSummary,
+)
 from app.services.room_service import RoomService
 import uuid
 
@@ -20,9 +25,19 @@ async def create_room(request: CreateRoomRequest):
     room = await RoomService.create_room(
         host_id=player_id,
         username=request.username,
-        max_players=request.max_players
+        max_players=request.max_players,
+        is_public=request.is_public,
     )
     return room
+
+
+# ⚠️ IMPORTANT: This route MUST be defined BEFORE /{room_code} so FastAPI
+# does not match the literal string 'public' as a room_code parameter.
+@router.get("/public", response_model=list[RoomSummary])
+async def get_public_rooms():
+    """Return all joinable public rooms for the lobby."""
+    rooms = await RoomService.get_public_rooms()
+    return rooms
 
 
 @router.post("/join", response_model=Room)

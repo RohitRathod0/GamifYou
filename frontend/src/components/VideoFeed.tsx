@@ -248,7 +248,7 @@ export const VideoFeed: React.FC<VideoFeedProps> = ({ localStream = undefined, o
 
     return (
         <div style={{
-            position: 'fixed', top: '16px', right: '16px', zIndex: 1000,
+            position: 'fixed', top: '96px', right: '16px', zIndex: 1000,
             display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px',
         }}>
             <div style={{

@@ -17,6 +17,7 @@ export interface Room {
     game_state: Record<string, any>;
     created_at: string;
     is_active: boolean;
+    is_public: boolean;
 }
 
 export interface Player {
@@ -28,9 +29,19 @@ export interface Player {
     joined_at: string;
 }
 
+export interface RoomSummary {
+    room_code: string;
+    host_username: string;
+    player_count: number;
+    max_players: number;
+    current_game: string | null;
+    is_public: boolean;
+    created_at: string | null;
+}
+
 export const roomAPI = {
-    createRoom: async (username: string, maxPlayers: number = 6): Promise<Room> => {
-        const response = await api.post('/api/rooms/create', { username, max_players: maxPlayers });
+    createRoom: async (username: string, maxPlayers: number = 6, isPublic: boolean = false): Promise<Room> => {
+        const response = await api.post('/api/rooms/create', { username, max_players: maxPlayers, is_public: isPublic });
         return response.data;
     },
 
@@ -46,6 +57,11 @@ export const roomAPI = {
 
     getActiveRooms: async (): Promise<string[]> => {
         const response = await api.get('/api/rooms/');
+        return response.data;
+    },
+
+    getPublicRooms: async (): Promise<RoomSummary[]> => {
+        const response = await api.get('/api/rooms/public');
         return response.data;
     },
 

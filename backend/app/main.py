@@ -13,9 +13,10 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
+from app.routers import auth 
 from app.core.config import settings
-from app.database import db
+from app.redis_db import db as redis_db
+import app.database.db as mongo_db
 from app.routers import cv, rooms, websocket, voice
 
 
@@ -23,14 +24,16 @@ from app.routers import cv, rooms, websocket, voice
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage startup and shutdown lifecycle for the FastAPI application.
 
-    Startup: connect to Redis.
-    Shutdown: disconnect from Redis.
+    Startup: connect to Redis and MongoDB.
+    Shutdown: disconnect.
     """
     print("🚀 Starting GestureHub API...")
-    await db.connect()
+    await redis_db.connect()
+    await mongo_db.connect()
     yield
     print("🛑 Shutting down GestureHub API...")
-    await db.disconnect()
+    await redis_db.disconnect()
+    await mongo_db.disconnect()
 
 
 # ── Application ───────────────────────────────────────────────────────────────
@@ -66,7 +69,7 @@ app.include_router(rooms.router)
 app.include_router(cv.router)
 app.include_router(websocket.router)
 app.include_router(voice.router)
-
+app.include_router(auth.router)
 
 # ── Health Endpoints ──────────────────────────────────────────────────────────
 

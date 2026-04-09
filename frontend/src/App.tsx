@@ -1,9 +1,11 @@
 import { useState, useEffect } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import { Lobby } from '@/components/Lobby';
 import { RoomView } from '@/components/RoomView';
+import { PublicLobby } from '@/components/PublicLobby';
 import { AIAvatar } from '@/components/Avatar/AIAvatar';
 import { VirtualBackground } from '@/components/Background/VirtualBackground';
+import { roomAPI } from '@/utils/api';
 
 export interface AppState {
     username: string;
@@ -14,18 +16,60 @@ export interface AppState {
 
 const SESSION_KEY = 'gesturehub_session';
 
-/** Read persisted session — currentGame is always cleared on reload
- *  (camera + WS need to reinitialize; user lands on game picker instead). */
+/** Read persisted session — currentGame is always cleared on reload */
 function loadSession(): AppState {
     try {
         const raw = sessionStorage.getItem(SESSION_KEY);
         if (raw) {
             const saved = JSON.parse(raw) as AppState;
-            return { ...saved, currentGame: null }; // never restore mid-game state
+            return { ...saved, currentGame: null };
         }
     } catch { /* ignore corrupt data */ }
     return { username: '', roomCode: '', playerId: '', currentGame: null };
 }
+
+// ── Public Lobby page wrapper (needs navigate, so lives inside <Router>) ──────
+
+interface PublicLobbyPageProps {
+    appState: AppState;
+    setAppState: React.Dispatch<React.SetStateAction<AppState>>;
+}
+
+function PublicLobbyPage({ setAppState }: PublicLobbyPageProps) {
+    const navigate = useNavigate();
+
+    const handleJoinRoom = (roomCode: string, username: string, playerId: string) => {
+        setAppState({ username, roomCode, playerId, currentGame: null });
+        navigate('/room');
+    };
+
+    const handleCreateRoom = async (isPublic: boolean) => {
+        // Read username from sessionStorage (set by Lobby / PublicLobby input)
+        const username = sessionStorage.getItem('gesturehub_username') ?? '';
+        if (!username.trim()) {
+            // If no username, send them to the main lobby to fill it in
+            navigate('/lobby');
+            return;
+        }
+        try {
+            const room = await roomAPI.createRoom(username, 6, isPublic);
+            setAppState({ username, roomCode: room.room_code, playerId: room.host_id, currentGame: null });
+            navigate('/room');
+        } catch {
+            navigate('/lobby');
+        }
+    };
+
+    return (
+        <PublicLobby
+            onJoinRoom={handleJoinRoom}
+            onCreateRoom={handleCreateRoom}
+            onBack={() => navigate('/lobby')}
+        />
+    );
+}
+
+// ── Root App ──────────────────────────────────────────────────────────────────
 
 function App() {
     const [appState, setAppState] = useState<AppState>(loadSession);
@@ -35,24 +79,22 @@ function App() {
         if (appState.roomCode) {
             sessionStorage.setItem(SESSION_KEY, JSON.stringify(appState));
         } else {
-            // Cleared room (e.g. left lobby) — remove saved session
             sessionStorage.removeItem(SESSION_KEY);
         }
     }, [appState]);
 
     return (
         <Router>
-            <div className="app" style={{ minHeight: '100vh', backgroundColor: '#0a0a0a', color: '#fff' }}>
+            <div className="app" style={{ minHeight: '100vh' }}>
                 <Routes>
                     <Route path="/" element={<Navigate to="/lobby" replace />} />
                     <Route
                         path="/lobby"
-                        element={
-                            <Lobby
-                                appState={appState}
-                                setAppState={setAppState}
-                            />
-                        }
+                        element={<Lobby appState={appState} setAppState={setAppState} />}
+                    />
+                    <Route
+                        path="/public-rooms"
+                        element={<PublicLobbyPage appState={appState} setAppState={setAppState} />}
                     />
                     <Route
                         path="/ai-avatar"
@@ -78,4 +120,4 @@ function App() {
     );
 }
 
-export default App;
+export default App;

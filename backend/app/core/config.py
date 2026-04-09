@@ -1,52 +1,40 @@
-"""
-GestureHub Backend — Core Configuration
-Reads all settings from environment variables with type safety and defaults.
-"""
-from pydantic_settings import BaseSettings
-from typing import List
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import List, Optional
 
 
 class Settings(BaseSettings):
-    """Central application configuration via Pydantic BaseSettings.
-
-    All fields can be overridden by environment variables (case-insensitive).
-    See backend/.env.example for a full list of supported variables.
-    """
-
     # App
-    app_name: str = "GestureHub"
-    debug: bool = False
+    app_name: str = "GestureHub API"
+    debug: bool = True
 
-    # Redis
-    redis_host: str = "localhost"
-    redis_port: int = 6379
-    redis_db: int = 0
-    redis_password: str | None = None
-    redis_ttl_seconds: int = 3600
+    # Frontend
+    frontend_url: str
 
     # CORS
-    frontend_url: str = "http://localhost:5173"
-    allowed_origins: List[str] = [
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:3000",
-    ]
+    allowed_origins: List[str] = ["*"]
+
+    # MongoDB
+    mongo_url: str
+
+    # JWT
+    secret_key: str
+    algorithm: str = "HS256"
+    access_token_expire_minutes: int = 60
+
+    # Redis
+    redis_host: str
+    redis_port: int
+    redis_db: int
+    redis_password: Optional[str] = None
 
     # Room
     max_players_per_room: int = 6
     room_code_length: int = 6
-    ws_heartbeat_interval: int = 30
 
-    # CV Pipeline — all tunable via .env
-    gesture_confidence_threshold: float = 0.85
-    gesture_smoothing_window: int = 3
-    landmark_buffer_size: int = 10
-    landmark_ema_alpha: float = 0.7  # higher = more responsive, lower = smoother
-
-    class Config:  # noqa: D106
-        env_file = ".env"
-        case_sensitive = False
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=False,
+    )
 
 
 settings = Settings()

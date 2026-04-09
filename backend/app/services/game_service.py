@@ -1,5 +1,5 @@
 from typing import Dict, Any
-from app.models import GameType
+from app.schemas.room import GameType
 
 
 class GameService:

@@ -26,11 +26,11 @@ class RedisDB:
 
             # Test connection
             await self.redis.ping()
-            print("✅ Connected to Redis")
+            print("[Redis] Connected")
             self.use_memory_fallback = False
         except Exception as e:
-            print(f"⚠️  Redis connection failed: {e}")
-            print("⚠️  Using in-memory storage (data will be lost on restart)")
+            print(f"[Redis] connection failed: {e}")
+            print("[Redis] Using in-memory storage (data will be lost on restart)")
             self.use_memory_fallback = True
             self.redis = None
     
@@ -38,9 +38,9 @@ class RedisDB:
         """Disconnect from Redis"""
         if self.redis and not self.use_memory_fallback:
             await self.redis.close()
-            print("❌ Disconnected from Redis")
+            print("[Redis] Disconnected")
         else:
-            print("❌ Cleared in-memory storage")
+            print("[Redis] Cleared in-memory storage")
             self._memory_store.clear()
     
     async def set(self, key: str, value: Any, expire: int = None):

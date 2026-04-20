@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     max_players_per_room: int = 6
     room_code_length: int = 6
 
+    # CV / Gesture pipeline
+    gesture_confidence_threshold: float = 0.75
+    landmark_ema_alpha: float = 0.5
+    gesture_smoothing_window: int = 5
+
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=False,

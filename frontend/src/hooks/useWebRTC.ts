@@ -60,6 +60,17 @@ export const useWebRTC = ({ localStream, sendSignal, onRemoteStream }: UseWebRTC
             }
         };
 
+        // ── FIX: Handle renegotiation for late-added tracks ────────
+        pc.onnegotiationneeded = async () => {
+            try {
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                sendSignal('webrtc_offer', { target_player_id: peerId, offer });
+            } catch (err) {
+                console.error('[WebRTC] Renegotiation error:', err);
+            }
+        };
+
         // ICE candidate exchange
         pc.onicecandidate = (event) => {
             if (event.candidate) {

@@ -434,6 +434,31 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
                 const aimed = snapToLegal(cursor, legal);
                 aimedSquareRef.current = aimed ?? null;
 
+                // ── Instant deselect when finger moves onto another piece ────
+                // If the cursor is on a square that has a piece AND that square is
+                // NOT a legal capture destination AND NOT the selected piece itself,
+                // the user is pointing away — clear selection immediately so they
+                // can select a different piece without getting locked.
+                if (sq && !sameSq) {
+                    const isLegal = legal.some(m => m.row === sq.row && m.col === sq.col);
+                    const isSamePiece = selectedRef.current &&
+                        sq.row === selectedRef.current.row && sq.col === selectedRef.current.col;
+                    const pieceOnSq = boardRef.current[sq.row]?.[sq.col];
+
+                    if (!isLegal && !isSamePiece && pieceOnSq) {
+                        // Finger moved to a different piece that isn't a valid capture → deselect
+                        selectedRef.current    = null;
+                        validMovesRef.current  = [];
+                        aimedSquareRef.current = null;
+                        phaseRef.current       = 'IDLE';
+                        dwellSquareRef.current   = sq;
+                        dwellStartRef.current    = now;
+                        dwellProgressRef.current = 0;
+                        holdProgressRef.current  = 0;
+                        return; // skip dwell-confirm logic below
+                    }
+                }
+
                 if (sq && dwellElapsed >= HOLD_SELECT_MS) {
                     const isLegal = legal.some(m => m.row === sq.row && m.col === sq.col);
                     const isSamePiece = selectedRef.current &&
@@ -457,7 +482,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
                         dwellProgressRef.current = 0;
                         holdProgressRef.current  = 0;
                     }
-                    // else: dwell on empty / opponent square — stay SELECTED, let user aim elsewhere
+                    // else: dwell on empty square — stay SELECTED, let user aim elsewhere
                 }
 
             // ── COOLDOWN ─────────────────────────────────────────────────────

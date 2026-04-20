@@ -30,7 +30,13 @@ export const GameSelector: React.FC<GameSelectorProps> = ({
     switch (game) {
         case GAMES.AIR_HOCKEY:
             return (
-                <AirHockey localStream={localStream} />
+                <AirHockey 
+                    localStream={localStream}
+                    playerId={playerId}
+                    gameState={gameState}
+                    onStateUpdate={onStateUpdate}
+                    sendMessage={sendMessage}
+                />
             );
         case GAMES.BALLOON_POP:
             return (
@@ -39,6 +45,7 @@ export const GameSelector: React.FC<GameSelectorProps> = ({
                     playerId={playerId}
                     gameState={gameState}
                     onStateUpdate={onStateUpdate}
+                    sendMessage={sendMessage}
                 />
             );
         case GAMES.CHESS:

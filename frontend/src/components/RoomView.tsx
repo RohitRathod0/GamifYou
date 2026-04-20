@@ -25,6 +25,7 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
     const [incomingChessState, setIncomingChessState] = useState<any>(null);
 
     const [isMicMuted, setIsMicMuted] = useState(false);
+    const [remoteAudioMuted, setRemoteAudioMuted] = useState(false);
     const [videoEnabled, setVideoEnabled] = useState(true);
     const [localStream, setLocalStream] = useState<MediaStream | null>(null);
 
@@ -344,10 +345,10 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                     width: 320, height: 240, borderRadius: 16, overflow: 'hidden',
                     boxShadow: '0 8px 32px rgba(0,0,0,0.15)', border: '1px solid rgba(0,0,0,0.1)', background: '#000',
                 }}>
-                    <video ref={remoteVideoRef} autoPlay playsInline style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                    <video ref={remoteVideoRef} autoPlay playsInline muted={remoteAudioMuted} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                     <div style={{ position: 'absolute', bottom: 0, left: 0, background: 'rgba(0,0,0,0.6)', color: '#fff', fontSize: 12, padding: '4px 10px', borderRadius: '0 0 0 16px' }}>Opponent</div>
-                    <button onClick={toggleMic} style={{ position: 'absolute', top: 8, right: 8, background: isMicMuted ? 'rgba(239,68,68,0.85)' : 'rgba(59,130,246,0.85)', border: 'none', borderRadius: 8, padding: '4px 10px', color: '#fff', fontSize: 13, cursor: 'pointer' }}>
-                        {isMicMuted ? '🔇' : '🎤'}
+                    <button onClick={() => setRemoteAudioMuted(m => !m)} style={{ position: 'absolute', top: 8, right: 8, background: remoteAudioMuted ? 'rgba(239,68,68,0.85)' : 'rgba(59,130,246,0.85)', border: 'none', borderRadius: 8, padding: '4px 10px', color: '#fff', fontSize: 13, cursor: 'pointer' }}>
+                        {remoteAudioMuted ? '🔇' : '🔊'}
                     </button>
                 </div>
             )}

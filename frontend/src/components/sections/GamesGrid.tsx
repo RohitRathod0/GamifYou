@@ -9,14 +9,15 @@ interface GameCardData {
   emoji: string;
   gradient: string;
   players: string;
+  image?: string;
 }
 
 const GAMES: GameCardData[] = [
-  { type: 'chess', label: 'Chess', description: 'Dwell-based gesture control', emoji: '♟️', gradient: 'linear-gradient(135deg,#1a1a2e,#16213e,#0f3460)', players: '2 players' },
-  { type: 'air_hockey', label: 'Air Hockey', description: 'Real-time hand tracking', emoji: '🏒', gradient: 'linear-gradient(135deg,#1a1a2e,#0d2137,#1a3a5c)', players: '2 players' },
-  { type: 'scribble', label: 'Scribble Draw', description: 'Draw & guess with friends', emoji: '✏️', gradient: 'linear-gradient(135deg,#1a2010,#0d2010,#0a1a05)', players: '2–6 players' },
-  { type: 'balloon_pop', label: 'Balloon Pop', description: 'Pinch to pop!', emoji: '🎈', gradient: 'linear-gradient(135deg,#2d1b2e,#3d1a3d,#1a0a2e)', players: '1–4 players' },
-  { type: 'face_puzzle', label: 'Face Puzzle', description: 'Facial landmark challenge', emoji: '🧩', gradient: 'linear-gradient(135deg,#2a1a0a,#3d2010,#1a0d05)', players: '1–2 players' },
+  { type: 'chess', label: 'Chess', description: 'Dwell-based gesture control', emoji: '♟️', gradient: 'linear-gradient(135deg,#1a1a2e,#16213e,#0f3460)', players: '2 players', image: '/game-assets/chess.jpg' },
+  { type: 'air_hockey', label: 'Air Hockey', description: 'Real-time hand tracking', emoji: '🏒', gradient: 'linear-gradient(135deg,#1a1a2e,#0d2137,#1a3a5c)', players: '2 players', image: '/game-assets/air_hockey.jpg' },
+  { type: 'scribble', label: 'Scribble Draw', description: 'Draw & guess with friends', emoji: '✏️', gradient: 'linear-gradient(135deg,#1a2010,#0d2010,#0a1a05)', players: '2–6 players', image: '/game-assets/scribble.jpg' },
+  { type: 'balloon_pop', label: 'Balloon Pop', description: 'Pinch to pop!', emoji: '🎈', gradient: 'linear-gradient(135deg,#2d1b2e,#3d1a3d,#1a0a2e)', players: '1–4 players', image: '/game-assets/balloon_pop.jpg' },
+  { type: 'face_puzzle', label: 'Face Puzzle', description: 'Facial landmark challenge', emoji: '🧩', gradient: 'linear-gradient(135deg,#2a1a0a,#3d2010,#1a0d05)', players: '1–2 players', image: '/game-assets/face_puzzle.jpg' },
 ];
 
 function GameCard({ game, index, onClick }: { game: GameCardData; index: number; onClick?: (type: string) => void }) {
@@ -42,17 +43,33 @@ function GameCard({ game, index, onClick }: { game: GameCardData; index: number;
       <div style={{
         height: 220, position: 'relative', background: game.gradient, overflow: 'hidden',
       }}>
-        <ParticleCanvas density="low" />
-        <div style={{
-          position: 'absolute', inset: 0, zIndex: 1,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: 64,
-          textShadow: '0 0 40px rgba(255,255,255,0.3)',
-          transition: 'transform 0.3s ease',
-          transform: hovered ? 'scale(1.15)' : 'scale(1)',
-        }}>
-          {game.emoji}
-        </div>
+        {game.image ? (
+          <img 
+            src={game.image} 
+            alt={game.label} 
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              transition: 'transform 0.3s ease',
+              transform: hovered ? 'scale(1.05)' : 'scale(1)',
+            }}
+          />
+        ) : (
+          <>
+            <ParticleCanvas density="low" />
+            <div style={{
+              position: 'absolute', inset: 0, zIndex: 1,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 64,
+              textShadow: '0 0 40px rgba(255,255,255,0.3)',
+              transition: 'transform 0.3s ease',
+              transform: hovered ? 'scale(1.15)' : 'scale(1)',
+            }}>
+              {game.emoji}
+            </div>
+          </>
+        )}
       </div>
 
       {/* Card body */}

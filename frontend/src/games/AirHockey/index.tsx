@@ -3,6 +3,10 @@ import { useHandTracking } from '@/hooks/useHandTracking';
 
 interface AirHockeyProps {
     localStream?: MediaStream | null;
+    playerId?: string;
+    gameState?: any;
+    onStateUpdate?: (state: any) => void;
+    sendMessage?: (type: string, data: any) => void;
 }
 
 interface Paddle {
@@ -25,6 +29,10 @@ interface Puck {
 
 export const AirHockey: React.FC<AirHockeyProps> = ({
     localStream,
+    playerId,
+    gameState,
+    onStateUpdate,
+    sendMessage,
 }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const { trackingData, trackingDataRef } = useHandTracking(videoRef, localStream);
@@ -36,6 +44,11 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
         blue: null,
     });
     const lastSeenHandsRef = useRef<number>(0);
+
+    const isMultiplayer = !!gameState?.my_color;
+    const isHost = gameState?.my_color === 'white';
+    const myRole = isMultiplayer ? (isHost ? 'blue' : 'red') : 'local'; // Host = Blue (Bottom), Guest = Red (Top)
+    const lastSendRef = useRef<number>(0);
 
     // Local 2-player mode: track BOTH paddles
     const [puck, setPuck] = useState<Puck>({
@@ -60,8 +73,43 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
 
     // Update refs when state changes
     useEffect(() => {
-        puckRef.current = puck;
-    }, [puck]);
+        // Only update local ref if not host in multiplayer, so we don't clobber the shared reference
+        if (!isMultiplayer || isHost) {
+            puckRef.current = puck;
+        }
+    }, [puck, isMultiplayer, isHost]);
+
+    // Receive incoming state from opponent
+    useEffect(() => {
+        if (!gameState?.incomingState) return;
+        const msg = gameState.incomingState;
+        
+        if (myRole === 'blue') {
+            // I am host (blue), receive guest (red) paddle
+            if (msg.paddle === 'red') {
+                paddle1Ref.current.rawX = msg.x;
+                paddle1Ref.current.rawY = msg.y;
+                paddle1Ref.current.vx = msg.vx;
+                paddle1Ref.current.vy = msg.vy;
+            }
+        } else if (myRole === 'red') {
+            // I am guest (red), receive host (blue) paddle, puck, and scores
+            if (msg.paddle === 'blue') {
+                paddle2Ref.current.rawX = msg.x;
+                paddle2Ref.current.rawY = msg.y;
+                paddle2Ref.current.vx = msg.vx;
+                paddle2Ref.current.vy = msg.vy;
+            }
+            if (msg.puck) {
+                puckRef.current = msg.puck;
+                setPuck(msg.puck);
+            }
+            if (msg.scores) {
+                setScore1(msg.scores.score1);
+                setScore2(msg.scores.score2);
+            }
+        }
+    }, [gameState?.incomingState, myRole]);
 
     // Game logic for paddles moved entirely inside game loop
 
@@ -85,29 +133,6 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
             if (currentData.landmarks && currentData.landmarks.length > 0) {
                 const currentHandCount = currentData.landmarks.length;
 
-                if (lastSeenHandsRef.current === 0 && currentHandCount > 0) {
-                    handAssignmentsRef.current = { red: null, blue: null };
-                }
-                lastSeenHandsRef.current = currentHandCount;
-
-                if (handAssignmentsRef.current.red === null && handAssignmentsRef.current.blue === null && currentHandCount > 0) {
-                    if (currentHandCount === 1) {
-                        handAssignmentsRef.current = { red: 0, blue: null };
-                    } else if (currentHandCount === 2) {
-                        const hand0Y = currentData.landmarks[0][9]?.y || 0;
-                        const hand1Y = currentData.landmarks[1][9]?.y || 0;
-                        if (hand0Y < hand1Y) {
-                            handAssignmentsRef.current = { red: 0, blue: 1 };
-                        } else {
-                            handAssignmentsRef.current = { red: 1, blue: 0 };
-                        }
-                    }
-                } else if (handAssignmentsRef.current.red === null && handAssignmentsRef.current.blue !== null && currentHandCount === 2) {
-                    handAssignmentsRef.current.red = handAssignmentsRef.current.blue === 0 ? 1 : 0;
-                } else if (handAssignmentsRef.current.blue === null && handAssignmentsRef.current.red !== null && currentHandCount === 2) {
-                    handAssignmentsRef.current.blue = handAssignmentsRef.current.red === 0 ? 1 : 0;
-                }
-
                 const updatePaddleRef = (paddleRef: React.MutableRefObject<Paddle>, palmCenter: any) => {
                     const rawPointX = (1 - palmCenter.x) * canvas.width;
                     const rawPointY = palmCenter.y * canvas.height;
@@ -123,14 +148,50 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
                     paddleRef.current.rawY = clampedY;
                 };
 
-                if (handAssignmentsRef.current.red !== null && currentData.landmarks[handAssignmentsRef.current.red]) {
-                    const palmCenter = currentData.landmarks[handAssignmentsRef.current.red][9];
-                    if (palmCenter) updatePaddleRef(paddle1Ref, palmCenter);
-                }
+                if (isMultiplayer) {
+                    if (currentHandCount > 0) {
+                        const palmCenter = currentData.landmarks[0][9];
+                        if (palmCenter) {
+                            if (myRole === 'blue') {
+                                updatePaddleRef(paddle2Ref, palmCenter);
+                            } else {
+                                updatePaddleRef(paddle1Ref, palmCenter);
+                            }
+                        }
+                    }
+                } else {
+                    if (lastSeenHandsRef.current === 0 && currentHandCount > 0) {
+                        handAssignmentsRef.current = { red: null, blue: null };
+                    }
+                    lastSeenHandsRef.current = currentHandCount;
 
-                if (handAssignmentsRef.current.blue !== null && currentData.landmarks[handAssignmentsRef.current.blue]) {
-                    const palmCenter = currentData.landmarks[handAssignmentsRef.current.blue][9];
-                    if (palmCenter) updatePaddleRef(paddle2Ref, palmCenter);
+                    if (handAssignmentsRef.current.red === null && handAssignmentsRef.current.blue === null && currentHandCount > 0) {
+                        if (currentHandCount === 1) {
+                            handAssignmentsRef.current = { red: 0, blue: null };
+                        } else if (currentHandCount === 2) {
+                            const hand0Y = currentData.landmarks[0][9]?.y || 0;
+                            const hand1Y = currentData.landmarks[1][9]?.y || 0;
+                            if (hand0Y < hand1Y) {
+                                handAssignmentsRef.current = { red: 0, blue: 1 };
+                            } else {
+                                handAssignmentsRef.current = { red: 1, blue: 0 };
+                            }
+                        }
+                    } else if (handAssignmentsRef.current.red === null && handAssignmentsRef.current.blue !== null && currentHandCount === 2) {
+                        handAssignmentsRef.current.red = handAssignmentsRef.current.blue === 0 ? 1 : 0;
+                    } else if (handAssignmentsRef.current.blue === null && handAssignmentsRef.current.red !== null && currentHandCount === 2) {
+                        handAssignmentsRef.current.blue = handAssignmentsRef.current.red === 0 ? 1 : 0;
+                    }
+
+                    if (handAssignmentsRef.current.red !== null && currentData.landmarks[handAssignmentsRef.current.red]) {
+                        const palmCenter = currentData.landmarks[handAssignmentsRef.current.red][9];
+                        if (palmCenter) updatePaddleRef(paddle1Ref, palmCenter);
+                    }
+
+                    if (handAssignmentsRef.current.blue !== null && currentData.landmarks[handAssignmentsRef.current.blue]) {
+                        const palmCenter = currentData.landmarks[handAssignmentsRef.current.blue][9];
+                        if (palmCenter) updatePaddleRef(paddle2Ref, palmCenter);
+                    }
                 }
             } else if (currentData.landmarks.length === 0) {
                 lastSeenHandsRef.current = 0;
@@ -182,34 +243,9 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
             // Update puck physics (use ref to avoid setState in loop)
             let newPuck = { ...puckRef.current };
 
-            // Move puck
-            newPuck.x += newPuck.vx * deltaTime;
-            newPuck.y += newPuck.vy * deltaTime;
-
-            // Wall collisions (left/right)
-            if (newPuck.x - newPuck.radius < 0 || newPuck.x + newPuck.radius > canvas.width) {
-                newPuck.vx *= -0.95; // Slight dampening
-                newPuck.x = Math.max(newPuck.radius, Math.min(canvas.width - newPuck.radius, newPuck.x));
-            }
-
-            // Goal detection - only score when puck CENTER enters goal area AND is within goal width
-            const goalWidth = 200; // Goal is 200px wide
-            const goalLeft = canvas.width / 2 - goalWidth / 2;
-            const goalRight = canvas.width / 2 + goalWidth / 2;
-
-            if (newPuck.y < 20 && newPuck.x > goalLeft && newPuck.x < goalRight) {
-                // Player 2 (blue) scores - puck entered top goal
-                setScore2(s => s + 1);
-                newPuck = { x: 400, y: 300, vx: 3, vy: 2, radius: 15 };
-            } else if (newPuck.y > canvas.height - 20 && newPuck.x > goalLeft && newPuck.x < goalRight) {
-                // Player 1 (red) scores - puck entered bottom goal
-                setScore1(s => s + 1);
-                newPuck = { x: 400, y: 300, vx: 3, vy: -2, radius: 15 };
-            }
-
             // Paddle collisions (Using Prediction + Radius Buffer logic)
             const checkPaddleCollision = (paddle: Paddle) => {
-                // Feature 3 & 4: Slight Prediction + Buffer hides ghost collision
+                // ... paddle collision code
                 const predX = paddle.rawX + paddle.vx * 0.5;
                 const predY = paddle.rawY + paddle.vy * 0.5;
                 const collisionRadius = paddle.radius + 5; // Extra buffer
@@ -238,12 +274,42 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
                 }
             };
 
-            checkPaddleCollision(paddle1Ref.current);
-            checkPaddleCollision(paddle2Ref.current);
+            // Only compute puck physics if local or host
+            if (!isMultiplayer || isHost) {
+                // Move puck
+                newPuck.x += newPuck.vx * deltaTime;
+                newPuck.y += newPuck.vy * deltaTime;
 
-            // Update puck ref
-            puckRef.current = newPuck;
-            setPuck(newPuck); // Update state for React (but won't trigger re-render loop)
+                // Wall collisions (left/right)
+                if (newPuck.x - newPuck.radius < 0 || newPuck.x + newPuck.radius > canvas.width) {
+                    newPuck.vx *= -0.95; // Slight dampening
+                    newPuck.x = Math.max(newPuck.radius, Math.min(canvas.width - newPuck.radius, newPuck.x));
+                }
+
+                // Goal detection
+                const goalWidth = 200; // Goal is 200px wide
+                const goalLeft = canvas.width / 2 - goalWidth / 2;
+                const goalRight = canvas.width / 2 + goalWidth / 2;
+
+                if (newPuck.y < 20 && newPuck.x > goalLeft && newPuck.x < goalRight) {
+                    // Player 2 (blue) scores - puck entered top goal
+                    setScore2(s => s + 1);
+                    newPuck = { x: 400, y: 300, vx: 3, vy: 2, radius: 15 };
+                } else if (newPuck.y > canvas.height - 20 && newPuck.x > goalLeft && newPuck.x < goalRight) {
+                    // Player 1 (red) scores - puck entered bottom goal
+                    setScore1(s => s + 1);
+                    newPuck = { x: 400, y: 300, vx: 3, vy: -2, radius: 15 };
+                }
+
+                checkPaddleCollision(paddle1Ref.current);
+                checkPaddleCollision(paddle2Ref.current);
+
+                // Update puck ref
+                puckRef.current = newPuck;
+                setPuck(newPuck); 
+            } else {
+                newPuck = puckRef.current;
+            }
 
             // Draw puck
             ctx.fillStyle = '#ffff00';
@@ -257,6 +323,38 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
             ctx.textAlign = 'center';
             ctx.fillText(score1.toString(), canvas.width / 2, 60);
             ctx.fillText(score2.toString(), canvas.width / 2, canvas.height - 30);
+
+            // Broadcast state if multiplayer
+            if (isMultiplayer && sendMessage) {
+                if (currentTime - lastSendRef.current > 33) { // ~30 fps
+                    lastSendRef.current = currentTime;
+                    if (myRole === 'blue') {
+                        // Host sends its paddle, puck, and scores
+                        sendMessage('game_state_update', {
+                            state: {
+                                paddle: 'blue',
+                                x: paddle2Ref.current.rawX,
+                                y: paddle2Ref.current.rawY,
+                                vx: paddle2Ref.current.vx,
+                                vy: paddle2Ref.current.vy,
+                                puck: puckRef.current,
+                                scores: { score1, score2 }
+                            }
+                        });
+                    } else if (myRole === 'red') {
+                        // Guest sends its paddle
+                        sendMessage('game_state_update', {
+                            state: {
+                                paddle: 'red',
+                                x: paddle1Ref.current.rawX,
+                                y: paddle1Ref.current.rawY,
+                                vx: paddle1Ref.current.vx,
+                                vy: paddle1Ref.current.vy,
+                            }
+                        });
+                    }
+                }
+            }
 
             animationRef.current = requestAnimationFrame(gameLoop);
         };
@@ -308,11 +406,13 @@ export const AirHockey: React.FC<AirHockeyProps> = ({
                     🔵 Blue Paddle (Bottom): Second hand detected
                 </p>
                 <p style={{ marginTop: '10px', fontSize: '0.8rem', color: '#aaa' }}>
-                    {trackingData?.landmarks?.length === 2
-                        ? '✅ Both paddles active! Play together!'
-                        : trackingData?.landmarks?.length === 1
-                            ? '👋 Show second hand to activate blue paddle'
-                            : '⏳ Show hands to start playing'}
+                    {isMultiplayer
+                        ? `🌐 Multiplayer: You are controlling the ${myRole === 'blue' ? '🔵 Blue (Bottom)' : '🔴 Red (Top)'} paddle`
+                        : trackingData?.landmarks?.length === 2
+                            ? '✅ Both paddles active! Play together!'
+                            : trackingData?.landmarks?.length === 1
+                                ? '👋 Show second hand to activate blue paddle'
+                                : '⏳ Show hands to start playing'}
                 </p>
             </div>
         </div>

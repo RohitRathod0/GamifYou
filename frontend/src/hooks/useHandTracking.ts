@@ -9,6 +9,8 @@ export interface HandTrackingData { landmarks: HandLandmark[][]; handedness: str
 let globalHands: Hands | null = null;
 let globalStream: MediaStream | null = null;
 let isInitializing = false;
+let globalCallbacks: Set<(results: Results) => void> = new Set();
+let globalFrameLoopRunning = false;
 
 export const useHandTracking = (
     videoRef: React.RefObject<HTMLVideoElement>,
@@ -22,8 +24,6 @@ export const useHandTracking = (
 
     // Still expose a state version, but only update it at low frequency if needed
     const [trackingData, setTrackingData] = useState<HandTrackingData>({ landmarks: [], handedness: [] });
-
-    const frameLoopRunning = useRef(false);
 
     const onResults = useCallback((results: Results) => {
         const newData: HandTrackingData = results.multiHandLandmarks?.length
@@ -83,6 +83,14 @@ export const useHandTracking = (
         });
     }, []);
 
+    // Register/unregister callback
+    useEffect(() => {
+        globalCallbacks.add(onResults);
+        return () => {
+            globalCallbacks.delete(onResults);
+        };
+    }, [onResults]);
+
     useEffect(() => {
         if (!videoRef.current || providedStream === null) return;
         if (isInitializing) return;
@@ -90,8 +98,13 @@ export const useHandTracking = (
         const init = async () => {
             // Reuse existing instance
             if (globalHands) {
-                globalHands.onResults(onResults);
-                if (globalStream) setMediaStream(globalStream);
+                if (globalStream) {
+                    setMediaStream(globalStream);
+                    if (videoRef.current && videoRef.current.srcObject !== globalStream) {
+                        videoRef.current.srcObject = globalStream;
+                        videoRef.current.play().catch(console.warn);
+                    }
+                }
                 setIsReady(true);
                 return;
             }
@@ -110,7 +123,10 @@ export const useHandTracking = (
                     minTrackingConfidence: MEDIAPIPE_CONFIG.minTrackingConfidence,
                 });
 
-                hands.onResults(onResults);
+                // Dispatch to all registered callbacks
+                hands.onResults((res) => {
+                    globalCallbacks.forEach(cb => cb(res));
+                });
 
                 // ✅ Initialize the model BEFORE starting the frame loop
                 await hands.initialize();
@@ -133,8 +149,8 @@ export const useHandTracking = (
                 globalHands = hands;
 
                 // ✅ Single frame loop, only starts once
-                if (!frameLoopRunning.current) {
-                    frameLoopRunning.current = true;
+                if (!globalFrameLoopRunning) {
+                    globalFrameLoopRunning = true;
                     const frameLoop = async () => {
                         if (videoRef.current && globalHands && !videoRef.current.paused) {
                             await globalHands.send({ image: videoRef.current });

@@ -125,6 +125,7 @@ class ScribbleGame:
 
     def start_game(self) -> dict:
         """Start the game from the waiting phase. Returns the first turn payload."""
+        random.shuffle(self.player_ids)
         self.round_number = 1
         self.current_drawer_index = 0
         self.scores = {pid: 0 for pid in self.player_ids}
@@ -249,6 +250,7 @@ class ScribbleGame:
             "round_duration": self.round_duration,
             "word_length": len(self.current_word),
             "word_hint": self.word_hint,
+            "word": self.current_word,
             "scores": dict(self.scores),
             "time_left": self.round_duration,
         }
@@ -272,6 +274,7 @@ class ScribbleGame:
 
         if self.current_drawer_index >= len(self.player_ids):
             # Completed one full round of all players
+            random.shuffle(self.player_ids)
             self.current_drawer_index = 0
             self.round_number += 1
 

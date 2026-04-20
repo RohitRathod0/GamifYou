@@ -55,7 +55,7 @@ export const ScribbleDraw: React.FC<ScribbleDrawProps> = ({
             if (type === 'scribble:state' || type === 'scribble:hint') {
                 setGameState((prev: any) => ({ ...prev, ...data }));
             } else if (type === 'scribble:turn_start') {
-                setGameState({ ...data, phase: 'drawing' });
+                setGameState((prev: any) => ({ ...prev, ...data, phase: 'drawing' }));
                 setStrokes([]);
                 setClearTrigger(c => c + 1);
                 addSystemMessage(`🖌️ ${data.drawer_username} is drawing now!`);
@@ -124,7 +124,7 @@ export const ScribbleDraw: React.FC<ScribbleDrawProps> = ({
     };
 
     const handleStart = () => {
-        sendMessage('scribble:start', { rounds: 3, draw_time: 80 });
+        sendMessage('scribble:start', { rounds: 3, draw_time: 120 });
     };
 
     return (
@@ -136,6 +136,7 @@ export const ScribbleDraw: React.FC<ScribbleDrawProps> = ({
                         round={gameState.round_number || 1}
                         maxRounds={gameState.max_rounds || 3}
                         timeLeft={gameState.time_left || 0}
+                        word={gameState.word}
                         wordHint={gameState.word_hint || ''}
                         isDrawer={isDrawer}
                         scores={gameState.scores || {}}

@@ -97,17 +97,32 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
     const stableBoardRef = useRef({ x: 0, y: 0, sqSize: 0, totalSize: 0 });
     // draw-only offset (floatY applied only in drawFrame)
     const floatRef = useRef({ t: 0 });
+    const [localMultiplayerState, setLocalMultiplayerState] = useState(false);
+    const localMultiplayerRef = useRef(false);
+    const setLocalMultiplayer = (val: boolean) => {
+        setLocalMultiplayerState(val);
+        localMultiplayerRef.current = val;
+        window.dispatchEvent(new CustomEvent('set_voice_active', { detail: { active: val || myColorRef.current === currentTurnRef.current } }));
+    };
 
     const [handReady, setHandReady] = useState(false);
     const [promotionPending, setPromotionPending] = useState<{ pos: Position; color: PieceColor } | null>(null);
     const [gameOverState, setGameOverState] = useState<{ winner: string; reason: string } | null>(null);
+    const [customStatusMsg, setCustomStatusMsg] = useState<{ msg: string; type: 'error' | 'info' } | null>(null);
+    const customStatusTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const showMessage = (msg: string, type: 'error' | 'info' = 'info') => {
+        setCustomStatusMsg({ msg, type });
+        if (customStatusTimerRef.current) clearTimeout(customStatusTimerRef.current);
+        customStatusTimerRef.current = setTimeout(() => setCustomStatusMsg(null), 3500);
+    };
+
     const [debugMode, setDebugMode] = useState(false);
     const [, setMyColor] = useState<PieceColor>('white');
     useEffect(() => {
         if (gameState?.my_color) {
             myColorRef.current = gameState.my_color as PieceColor;
             setMyColor(gameState.my_color as PieceColor);
-            window.dispatchEvent(new CustomEvent('set_voice_active', { detail: { active: myColorRef.current === currentTurnRef.current } }));
+            window.dispatchEvent(new CustomEvent('set_voice_active', { detail: { active: localMultiplayerRef.current || myColorRef.current === currentTurnRef.current } }));
         }
     }, [gameState?.my_color]);
 
@@ -135,7 +150,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
         if (s.chessBoard) boardRef.current = s.chessBoard;
         if (s.currentTurn) {
             currentTurnRef.current = s.currentTurn;
-            window.dispatchEvent(new CustomEvent('set_voice_active', { detail: { active: myColorRef.current === s.currentTurn } }));
+            window.dispatchEvent(new CustomEvent('set_voice_active', { detail: { active: localMultiplayerRef.current || myColorRef.current === s.currentTurn } }));
         }
         if (s.enPassantTarget !== undefined) epRef.current = s.enPassantTarget;
         if (s.lastMove !== undefined) lastMoveRef.current = s.lastMove;
@@ -273,7 +288,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
         const next: PieceColor = currentTurnRef.current === 'white' ? 'black' : 'white';
         boardRef.current = nb;
         currentTurnRef.current = next;
-        window.dispatchEvent(new CustomEvent('set_voice_active', { detail: { active: myColorRef.current === next } }));
+        window.dispatchEvent(new CustomEvent('set_voice_active', { detail: { active: localMultiplayerRef.current || myColorRef.current === next } }));
         
         epRef.current = newEp;
         lastMoveRef.current = { from, to };
@@ -313,8 +328,11 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
             const board = boardRef.current;
             const piece = board[fromPos.row][fromPos.col];
             
-            if (!piece || piece.color !== myColorRef.current || myColorRef.current !== currentTurnRef.current) {
+            const isLocal = localMultiplayerRef.current;
+            const canMove = isLocal ? piece && piece.color === currentTurnRef.current : (piece && piece.color === myColorRef.current && myColorRef.current === currentTurnRef.current);
+            if (!canMove) {
                 console.warn("[Voice] Move invalid: Not your piece or turn!");
+                showMessage("❌ Not your piece or turn!", 'error');
                 return;
             }
             
@@ -325,6 +343,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
                 doMove(fromPos, toPos);
             } else {
                 console.warn(`[Voice] Move ${action.from} -> ${action.to} is technically illegal on the board!`);
+                showMessage(`❌ Illegal move: ${action.from} to ${action.to}`, 'error');
             }
         };
 
@@ -390,7 +409,8 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
                     const myColor = myColorRef.current;
                     const piece   = boardRef.current[sq.row]?.[sq.col];
 
-                    if (piece && piece.color === myColor && myColor === currentTurnRef.current) {
+                    const canControl = localMultiplayerRef.current ? (piece && piece.color === currentTurnRef.current) : (piece && piece.color === myColor && myColor === currentTurnRef.current);
+                    if (canControl) {
                         // ✅ SELECT
                         selectedRef.current    = sq;
                         validMovesRef.current  = getLegalMoves(boardRef.current, sq, epRef.current);
@@ -716,22 +736,25 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
 
         // ── Status bar ────────────────────────────────────────────────────────
         const inChk = isInCheck(board, currentTurnRef.current);
+        const myTurn = localMultiplayerRef.current || myColorRef.current === currentTurnRef.current;
         const phaseHint = phase === 'SELECTED'
             ? '👆 Point at a blue dot and hold 0.4s to move'
-            : myColorRef.current === currentTurnRef.current
+            : myTurn
                 ? '👆 Your turn — point at your piece and hold 0.4s to select'
                 : `⏳ ${currentTurnRef.current}'s turn`;
 
-        const statusText = gameOverRef.current
-            ? `${gameOverRef.current.winner === 'Draw' ? '🤝 Draw' : `🏆 ${gameOverRef.current.winner} wins`} — ${gameOverRef.current.reason}`
-            : inChk ? `⚠️ CHECK! ${currentTurnRef.current} to move` : phaseHint;
+        const statusText = customStatusMsg 
+            ? customStatusMsg.msg 
+            : gameOverRef.current
+                ? `${gameOverRef.current.winner === 'Draw' ? '🤝 Draw' : `🏆 ${gameOverRef.current.winner} wins`} — ${gameOverRef.current.reason}`
+                : inChk ? `⚠️ CHECK! ${currentTurnRef.current} to move` : phaseHint;
 
         ctx.save();
         ctx.font = 'bold 17px "Segoe UI"'; ctx.textAlign = 'center';
         const tw = ctx.measureText(statusText).width;
         ctx.fillStyle = 'rgba(0,0,0,0.65)';
         ctx.beginPath(); ctx.roundRect(W / 2 - tw / 2 - 18, 12, tw + 36, 36, 18); ctx.fill();
-        ctx.fillStyle = inChk ? '#FF6B6B' : (phase === 'SELECTED' ? '#00AAFF' : myColorRef.current === currentTurnRef.current ? '#00E5FF' : '#aaa');
+        ctx.fillStyle = customStatusMsg?.type === 'error' ? '#FF4444' : inChk ? '#FF6B6B' : (phase === 'SELECTED' ? '#00AAFF' : myTurn ? '#00E5FF' : '#aaa');
         ctx.fillText(statusText, W / 2, 30);
         ctx.restore();
 
@@ -739,13 +762,14 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
         (['white', 'black'] as PieceColor[]).forEach((col, i) => {
             const tx = W / 2 + (i === 0 ? -92 : 10), ty = H - 44;
             const active = currentTurnRef.current === col;
+            const isMe = localMultiplayerRef.current || myColorRef.current === col;
             ctx.save();
             ctx.fillStyle = active ? (col === 'white' ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.85)') : 'rgba(255,255,255,0.1)';
             ctx.beginPath(); ctx.roundRect(tx, ty, 80, 30, 15); ctx.fill();
             if (active) { ctx.strokeStyle = '#00E5FF'; ctx.lineWidth = 2; ctx.stroke(); }
             ctx.fillStyle = active ? (col === 'white' ? '#000' : '#fff') : 'rgba(255,255,255,0.35)';
             ctx.font = 'bold 13px "Segoe UI"'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-            ctx.fillText((col === 'white' ? '⬜ White' : '⬛ Black') + (myColorRef.current === col ? ' (you)' : ''), tx + 40, ty + 15);
+            ctx.fillText((col === 'white' ? '⬜ White' : '⬛ Black') + (isMe ? ' (you)' : ''), tx + 40, ty + 15);
             ctx.restore();
         });
 
@@ -773,7 +797,7 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
         }
 
         // ── Gesture hints ─────────────────────────────────────────────────────
-        const hints = ['👆 Point at piece + hold 0.4s = SELECT', '👆 Point at blue dot + hold 0.4s = MOVE', 'Move away to cancel dwell'];
+        const hints = ['👆 Point at piece + hold 0.4s = SELECT', '👆 Point at blue dot + hold 0.4s = MOVE', '🎤 Say "E2 to E4" to move'];
         ctx.save();
         ctx.font = '12px "Segoe UI"'; ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(255,255,255,0.45)';
         hints.forEach((h, i) => ctx.fillText(h, W - 16, H - 70 + i * 18));
@@ -941,6 +965,9 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
 
 
             {/* Debug button */}
+            <button onClick={() => setLocalMultiplayer(!localMultiplayerState)} style={{ position: 'absolute', top: 20, right: 120, zIndex: 100, padding: '8px 16px', borderRadius: '20px', border: 'none', cursor: 'pointer', background: localMultiplayerState ? '#4CAF50' : 'rgba(255,255,255,0.15)', color: '#fff', fontSize: '13px', fontWeight: 700, backdropFilter: 'blur(4px)' }}>
+                👥 Pass & Play {localMultiplayerState ? 'ON' : 'OFF'}
+            </button>
             <button onClick={() => setDebugMode(d => !d)} style={{ position: 'absolute', top: 20, right: 20, zIndex: 100, padding: '8px 16px', borderRadius: '20px', border: 'none', cursor: 'pointer', background: debugMode ? '#F44336' : 'rgba(255,255,255,0.15)', color: '#fff', fontSize: '13px', fontWeight: 700, backdropFilter: 'blur(4px)' }}>
                 🐛 Debug
             </button>

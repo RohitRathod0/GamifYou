@@ -4,12 +4,13 @@ interface ScribbleHUDProps {
     round: number;
     maxRounds: number;
     timeLeft: number;
+    word?: string;
     wordHint: string;
     isDrawer: boolean;
     scores: Record<string, number>;
 }
 
-export const ScribbleHUD: React.FC<ScribbleHUDProps> = ({ round, maxRounds, timeLeft, wordHint, isDrawer, scores }) => {
+export const ScribbleHUD: React.FC<ScribbleHUDProps> = ({ round, maxRounds, timeLeft, word, wordHint, isDrawer, scores }) => {
     return (
         <div style={{ display: 'flex', flexDirection: 'column', width: '250px', gap: '15px' }}>
             <div style={{ background: '#222', padding: '15px', borderRadius: '12px', border: '1px solid #444' }}>
@@ -26,7 +27,7 @@ export const ScribbleHUD: React.FC<ScribbleHUDProps> = ({ round, maxRounds, time
                     {isDrawer ? 'Draw this word:' : 'Word Hint:'}
                 </div>
                 <div style={{ fontSize: '1.5rem', fontWeight: 'bold', letterSpacing: '3px', color: '#60a5fa' }}>
-                    {wordHint || '---'}
+                    {isDrawer ? word : (wordHint || '---')}
                 </div>
             </div>
             

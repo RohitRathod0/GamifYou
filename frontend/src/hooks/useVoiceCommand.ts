@@ -113,7 +113,7 @@ export function useVoiceCommand(onIntentMatched: (result: VoiceIntentResult) => 
                 const rms = Math.sqrt(sumSquares / pcmData.length);
                 
                 // Threshold for detecting speech (adjust if too sensitive/insensitive)
-                const isSpeakingNow = rms > 0.02;
+                const isSpeakingNow = rms > 0.01;
 
                 if (isSpeakingNow) {
                     if (!currentTalkingState) {

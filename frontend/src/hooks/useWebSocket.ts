@@ -55,10 +55,19 @@ export const useWebSocket = ({ roomCode, playerId, shouldConnect = true, onMessa
         ws.onclose = () => {
             console.log('🔌 WebSocket disconnected');
             setIsConnected(false);
+            wsRef.current = null;
+            
+            // Auto-reconnect if we are still supposed to be connected
+            if (shouldConnect) {
+                console.log('🔄 Attempting to reconnect in 2 seconds...');
+                setTimeout(() => {
+                    connect();
+                }, 2000);
+            }
         };
 
         wsRef.current = ws;
-    }, [roomCode, playerId]); // Callback refs omitted intentionally to prevent teardown on render
+    }, [roomCode, playerId, shouldConnect]); // Callback refs omitted intentionally to prevent teardown on render
 
     const sendMessage = useCallback((type: string, data: any) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {

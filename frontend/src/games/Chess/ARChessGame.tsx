@@ -20,6 +20,7 @@ import {
     Board, Piece, PieceColor, PieceType, Position,
 } from './ChessLogic';
 import { ChessVoiceHelper } from './ChessVoiceHelper';
+import { getBestMove } from './ChessAI';
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const BOARD_COLS = 8;
@@ -100,10 +101,36 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
     const floatRef = useRef({ t: 0 });
     const [localMultiplayerState, setLocalMultiplayerState] = useState(false);
     const localMultiplayerRef = useRef(false);
+    
+    const [aiOpponentState, setAiOpponentState] = useState(false);
+    const aiOpponentRef = useRef(false);
+
     const setLocalMultiplayer = (val: boolean) => {
         setLocalMultiplayerState(val);
         localMultiplayerRef.current = val;
+        if (val && aiOpponentState) {
+            setAiOpponentState(false);
+            aiOpponentRef.current = false;
+        }
         window.dispatchEvent(new CustomEvent('set_voice_active', { detail: { active: val || myColorRef.current === currentTurnRef.current } }));
+    };
+
+    const setAiOpponent = (val: boolean) => {
+        setAiOpponentState(val);
+        aiOpponentRef.current = val;
+        if (val && localMultiplayerState) {
+            setLocalMultiplayerState(false);
+            localMultiplayerRef.current = false;
+        }
+        window.dispatchEvent(new CustomEvent('set_voice_active', { detail: { active: myColorRef.current === currentTurnRef.current } }));
+        
+        if (val && currentTurnRef.current !== myColorRef.current && !gameOverRef.current) {
+            setTimeout(() => {
+                if (!aiOpponentRef.current || gameOverRef.current) return;
+                const aiMove = getBestMove(boardRef.current, currentTurnRef.current, epRef.current, 3);
+                if (aiMove) doMove(aiMove.from, aiMove.to);
+            }, 600);
+        }
     };
 
     const [handReady, setHandReady] = useState(false);
@@ -307,6 +334,14 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
         // Include playerId so RoomView knows this update came from US and
         // can skip applying it to our own board (prevents echo loop)
         sendWsMessage?.('game_state_update', { state: ns, player_id: playerId });
+
+        if (aiOpponentRef.current && next !== myColorRef.current && !result) {
+            setTimeout(() => {
+                if (!aiOpponentRef.current || gameOverRef.current) return;
+                const aiMove = getBestMove(boardRef.current, next, epRef.current, 3);
+                if (aiMove) doMove(aiMove.from, aiMove.to);
+            }, 600);
+        }
     }, [onStateUpdate, sendWsMessage, playerId]);
 
     // ── Voice Command Listener ────────────────────────────────────────────────
@@ -1014,6 +1049,9 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
             {/* Debug button */}
             <button onClick={() => setLocalMultiplayer(!localMultiplayerState)} style={{ position: 'absolute', top: 20, right: 120, zIndex: 100, padding: '8px 16px', borderRadius: '20px', border: 'none', cursor: 'pointer', background: localMultiplayerState ? '#4CAF50' : 'rgba(255,255,255,0.15)', color: '#fff', fontSize: '13px', fontWeight: 700, backdropFilter: 'blur(4px)' }}>
                 👥 Pass & Play {localMultiplayerState ? 'ON' : 'OFF'}
+            </button>
+            <button onClick={() => setAiOpponent(!aiOpponentState)} style={{ position: 'absolute', top: 20, right: 280, zIndex: 100, padding: '8px 16px', borderRadius: '20px', border: 'none', cursor: 'pointer', background: aiOpponentState ? '#8b5cf6' : 'rgba(255,255,255,0.15)', color: '#fff', fontSize: '13px', fontWeight: 700, backdropFilter: 'blur(4px)' }}>
+                🤖 Play AI {aiOpponentState ? 'ON' : 'OFF'}
             </button>
             <button onClick={() => setDebugMode(d => !d)} style={{ position: 'absolute', top: 20, right: 20, zIndex: 100, padding: '8px 16px', borderRadius: '20px', border: 'none', cursor: 'pointer', background: debugMode ? '#F44336' : 'rgba(255,255,255,0.15)', color: '#fff', fontSize: '13px', fontWeight: 700, backdropFilter: 'blur(4px)' }}>
                 🐛 Debug

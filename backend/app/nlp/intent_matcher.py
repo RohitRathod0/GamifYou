@@ -101,6 +101,7 @@ class IntentResult:
     action:     dict = field(default_factory=dict)
 
 def extract_chess_move(text: str) -> dict | None:
+    original_text = text
     text = text.lower()
     # Replace common phonetic mistakes and punctuation
     replacements = {
@@ -118,8 +119,17 @@ def extract_chess_move(text: str) -> dict | None:
     if len(coords) >= 2:
         return {
             "from": f"{coords[0][0]}{coords[0][1]}",
-            "to": f"{coords[1][0]}{coords[1][1]}"
+            "to": f"{coords[1][0]}{coords[1][1]}",
+            "raw": original_text
         }
+        
+    # If no explicit coords, check for broader natural language chess commands
+    chess_keywords = ["move", "knight", "bishop", "rook", "queen", "king", "pawn", "fork", "capture", "takes", "check"]
+    if any(kw in original_text.lower() for kw in chess_keywords) and len(original_text) < 150:
+        return {
+            "raw": original_text
+        }
+
     return None
 
 

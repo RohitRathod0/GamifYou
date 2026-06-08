@@ -456,8 +456,14 @@ async def websocket_endpoint(
                         )
 
                 elif message_type == "scribble:stroke":
+                    # Attach player_id so late joiners receiving canvas_replay also get it
+                    message_data["player_id"] = player_id
                     if game:
                         game.stroke_history.append(message_data)
+                    
+                    is_end = message_data.get("isEnd", message_data.get("is_end", False))
+                    brush_size = message_data.get("brushSize", message_data.get("brush_size", 4))
+
                     await manager.broadcast_to_room(
                         {
                             "type": "scribble:stroke",
@@ -465,8 +471,8 @@ async def websocket_endpoint(
                                 "player_id": player_id,
                                 "points": message_data.get("points", []),
                                 "color": message_data.get("color", "#000000"),
-                                "brush_size": message_data.get("brush_size", 4),
-                                "is_end": message_data.get("is_end", False),
+                                "brushSize": brush_size,
+                                "isEnd": is_end,
                             },
                         },
                         room_code,

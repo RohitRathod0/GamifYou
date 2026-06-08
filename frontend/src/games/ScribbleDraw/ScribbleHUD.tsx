@@ -8,9 +8,10 @@ interface ScribbleHUDProps {
     wordHint: string;
     isDrawer: boolean;
     scores: Record<string, number>;
+    usernames: Record<string, string>;
 }
 
-export const ScribbleHUD: React.FC<ScribbleHUDProps> = ({ round, maxRounds, timeLeft, word, wordHint, isDrawer, scores }) => {
+export const ScribbleHUD: React.FC<ScribbleHUDProps> = ({ round, maxRounds, timeLeft, word, wordHint, isDrawer, scores, usernames }) => {
     return (
         <div style={{ display: 'flex', flexDirection: 'column', width: '250px', gap: '15px' }}>
             <div style={{ background: '#222', padding: '15px', borderRadius: '12px', border: '1px solid #444' }}>
@@ -37,11 +38,37 @@ export const ScribbleHUD: React.FC<ScribbleHUDProps> = ({ round, maxRounds, time
                     {Object.entries(scores)
                         .sort(([, a], [, b]) => b - a)
                         .map(([pid, score], i) => (
-                        <div key={pid} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px', background: i === 0 ? 'rgba(255,215,0,0.1)' : '#333', borderRadius: '8px' }}>
-                            <span>
-                               {i === 0 ? '👑 ' : ''}{pid}
+                        <div key={pid} style={{
+                            display: 'flex', justifyContent: 'space-between',
+                            padding: '8px 10px',
+                            background: i === 0 ? 'rgba(255,215,0,0.15)' : '#333',
+                            borderRadius: '8px',
+                            alignItems: 'center',
+                            border: i === 0 ? '1px solid rgba(255,215,0,0.3)' : '1px solid transparent',
+                        }}>
+                            <span style={{ display: 'flex', alignItems: 'center', gap: '6px', overflow: 'hidden' }}>
+                                <span style={{ fontSize: '1rem' }}>
+                                    {i === 0 ? '👑' : i === 1 ? '🥈' : i === 2 ? '🥉' : '▪️'}
+                                </span>
+                                <span style={{
+                                    fontSize: '0.85rem',
+                                    color: i === 0 ? '#ffd700' : '#e5e7eb',
+                                    fontWeight: i === 0 ? 700 : 500,
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                    maxWidth: '130px',
+                                }}>
+                                    {usernames[pid] ?? pid.slice(0, 8) + '...'}
+                                </span>
                             </span>
-                            <span style={{ fontWeight: 'bold', color: i === 0 ? '#ffd700' : '#fff' }}>{score}</span>
+                            <span style={{
+                                fontWeight: 'bold',
+                                fontSize: '1rem',
+                                color: i === 0 ? '#ffd700' : '#fff',
+                                minWidth: '36px',
+                                textAlign: 'right',
+                            }}>{score}</span>
                         </div>
                     ))}
                 </div>

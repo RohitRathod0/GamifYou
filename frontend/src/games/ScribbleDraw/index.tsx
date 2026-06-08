@@ -26,6 +26,7 @@ export const ScribbleDraw: React.FC<ScribbleDrawProps> = ({
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [strokes, setStrokes] = useState<(StrokeData & { player_id: string })[]>([]);
     const [clearTrigger, setClearTrigger] = useState(0);
+    const [usernames, setUsernames] = useState<Record<string, string>>({});
 
     const isDrawer = gameState?.drawer_id === playerId;
     
@@ -54,8 +55,12 @@ export const ScribbleDraw: React.FC<ScribbleDrawProps> = ({
             
             if (type === 'scribble:state' || type === 'scribble:hint') {
                 setGameState((prev: any) => ({ ...prev, ...data }));
+                // Seed usernames from state snapshot
+                if (data.usernames) setUsernames((prev) => ({ ...prev, ...data.usernames }));
             } else if (type === 'scribble:turn_start') {
                 setGameState((prev: any) => ({ ...prev, ...data, phase: 'drawing' }));
+                // turn_start also carries usernames
+                if (data.usernames) setUsernames((prev) => ({ ...prev, ...data.usernames }));
                 setStrokes([]);
                 setClearTrigger(c => c + 1);
                 addSystemMessage(`🖌️ ${data.drawer_username} is drawing now!`);
@@ -73,9 +78,13 @@ export const ScribbleDraw: React.FC<ScribbleDrawProps> = ({
                 ]);
             } else if (type === 'scribble:correct') {
                 setGameState((prev: any) => ({ ...prev, scores: data.scores }));
+                // Keep username map up to date
+                if (data.username && data.player_id) {
+                    setUsernames((prev) => ({ ...prev, [data.player_id]: data.username }));
+                }
                 setMessages(m => [
                     ...m,
-                    { id: Date.now().toString() + Math.random(), sender: data.username, text: 'guessed the word!', isSystem: false, isCorrect: true }
+                    { id: Date.now().toString() + Math.random(), sender: data.username, text: 'guessed the word! 🎉', isSystem: false, isCorrect: true }
                 ]);
             } else if (type === 'scribble:round_end') {
                 setGameState((prev: any) => ({ ...prev, phase: 'round_end' }));
@@ -140,6 +149,7 @@ export const ScribbleDraw: React.FC<ScribbleDrawProps> = ({
                         wordHint={gameState.word_hint || ''}
                         isDrawer={isDrawer}
                         scores={gameState.scores || {}}
+                        usernames={usernames}
                     />
 
                     <div style={{ flex: 1, minWidth: '800px', maxWidth: '800px' }}>

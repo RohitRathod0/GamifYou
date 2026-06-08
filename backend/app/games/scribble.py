@@ -253,6 +253,7 @@ class ScribbleGame:
             "word": self.current_word,
             "scores": dict(self.scores),
             "time_left": self.round_duration,
+            "usernames": dict(self.usernames),
         }
 
     def _end_round(self) -> dict:

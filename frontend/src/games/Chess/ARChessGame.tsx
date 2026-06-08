@@ -19,6 +19,7 @@ import {
     isInCheck, cloneBoard, PIECE_UNICODE,
     Board, Piece, PieceColor, PieceType, Position,
 } from './ChessLogic';
+import { ChessVoiceHelper } from './ChessVoiceHelper';
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const BOARD_COLS = 8;
@@ -311,21 +312,39 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
     // ── Voice Command Listener ────────────────────────────────────────────────
     useEffect(() => {
         const handleVoiceMove = (e: Event) => {
-            const action = (e as CustomEvent).detail as { from: string; to: string };
-            if (!action || !action.from || !action.to) return;
+            const action = (e as CustomEvent).detail as { from?: string; to?: string; raw?: string };
+            if (!action) return;
             
-            // "b2" -> row: 6, col: 1
-            const parseCoord = (coord: string) => {
-                const col = coord.charCodeAt(0) - 97; // 'a' -> 0
-                const row = 8 - parseInt(coord[1]);    // '1' -> 7, '8' -> 0
-                return { row, col };
-            };
-            
-            const fromPos = parseCoord(action.from);
-            const toPos = parseCoord(action.to);
+            const board = boardRef.current;
+            const turn = currentTurnRef.current;
+            const ep = epRef.current;
+
+            let fromPos: Position | null = null;
+            let toPos: Position | null = null;
+
+            if (action.raw) {
+                const result = ChessVoiceHelper.resolveVoiceCommand(action.raw, board, turn, ep);
+                if (result) {
+                    fromPos = result.from;
+                    toPos = result.to;
+                }
+            } else if (action.from && action.to) {
+                // Legacy fallback
+                const parseCoord = (coord: string) => {
+                    const col = coord.charCodeAt(0) - 97;
+                    const row = 8 - parseInt(coord[1]);
+                    return { row, col };
+                };
+                fromPos = parseCoord(action.from);
+                toPos = parseCoord(action.to);
+            }
+
+            if (!fromPos || !toPos) {
+                showMessage("❌ Could not understand voice command.", 'error');
+                return;
+            }
             
             // Validate before making move
-            const board = boardRef.current;
             const piece = board[fromPos.row][fromPos.col];
             
             const isLocal = localMultiplayerRef.current;
@@ -336,14 +355,17 @@ export const ARChessGame: React.FC<ARChessGameProps> = ({
                 return;
             }
             
-            const legalMoves = getLegalMoves(boardRef.current, fromPos, epRef.current);
-            const isLegal = legalMoves.some(m => m.row === toPos.row && m.col === toPos.col);
+            const legalMoves = getLegalMoves(board, fromPos, ep);
+            const isLegal = legalMoves.some(m => m.row === toPos!.row && m.col === toPos!.col);
             
             if (isLegal) {
                 doMove(fromPos, toPos);
             } else {
-                console.warn(`[Voice] Move ${action.from} -> ${action.to} is technically illegal on the board!`);
-                showMessage(`❌ Illegal move: ${action.from} to ${action.to}`, 'error');
+                const cols = 'abcdefgh';
+                const fStr = `${cols[fromPos.col]}${8 - fromPos.row}`;
+                const tStr = `${cols[toPos.col]}${8 - toPos.row}`;
+                console.warn(`[Voice] Move ${fStr} -> ${tStr} is technically illegal on the board!`);
+                showMessage(`❌ Illegal move: ${fStr} to ${tStr}`, 'error');
             }
         };
 

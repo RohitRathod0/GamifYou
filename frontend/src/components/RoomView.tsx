@@ -121,6 +121,11 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                     setMyChessColor(null);
                     break;
 
+                case 'game_selected':
+                    setAppState((prev: any) => ({ ...prev, currentGame: data.game_type }));
+                    showNotification(`Started: ${data.game_type.replace('_', ' ')}`);
+                    break;
+
                 case 'game_state_update':
                     setIncomingChessState({ ...data.state, _ts: Date.now() });
                     break;
@@ -191,7 +196,11 @@ export const RoomView: React.FC<RoomViewProps> = ({ appState, setAppState }) => 
                 case 'CHESS_MOVE':
                     if (currentGame === 'chess') {
                         window.dispatchEvent(new CustomEvent('chess_voice_move', { detail: result.action }));
-                        showNotification(`Voice: ♟️ ${result.action.from} → ${result.action.to}`);
+                        if (result.action.raw) {
+                            showNotification(`Voice: ♟️ "${result.action.raw}"`);
+                        } else {
+                            showNotification(`Voice: ♟️ ${result.action.from} → ${result.action.to}`);
+                        }
                     }
                     break;
                 default:

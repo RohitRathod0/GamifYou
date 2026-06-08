@@ -33,7 +33,7 @@ export function cloneBoard(b: Board): Board { return b.map(r => [...r]); }
 const inBounds = (r: number, c: number) => r >= 0 && r < 8 && c >= 0 && c < 8;
 
 // ── Raw moves (no check filtering) ───────────────────────────────────────────
-function getRawMoves(board: Board, pos: Position, ep: Position | null): Position[] {
+export function getRawMoves(board: Board, pos: Position, ep: Position | null): Position[] {
     const piece = board[pos.row][pos.col];
     if (!piece) return [];
     const { type, color } = piece;
